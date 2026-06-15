@@ -323,6 +323,9 @@ function normalizeAutoTrigger(input: unknown): AutoTriggerRule | undefined {
     ...boundedIntegerProp('pollIntervalSeconds', raw.pollIntervalSeconds, 5, 3600),
     ...boundedIntegerProp('pollLookbackSeconds', raw.pollLookbackSeconds, 30, 3600),
     ...boundedIntegerProp('pollPageSize', raw.pollPageSize, 1, 50),
+    ...(typeof raw.pollCatchUpOnStart === 'boolean'
+      ? { pollCatchUpOnStart: raw.pollCatchUpOnStart }
+      : {}),
   };
   const hasMatcher = Boolean(
     out.chatIds?.length ||

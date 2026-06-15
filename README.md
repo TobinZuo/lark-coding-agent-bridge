@@ -164,7 +164,7 @@ DMs do not require an @ mention. Groups and topic groups require `@bot` by defau
 
 Profiles can define `preferences.autoTriggers` for tightly scoped card workflows such as Argos alarm analysis. Auto triggers are evaluated after normal access control, so the group must still be in `access.allowedChats` (or the sender must be owner/admin). A matching rule may bypass the group `@bot` requirement for that one message only; ordinary group chatter remains quiet.
 
-If the platform does not deliver unmentioned bot/app messages to this bot, enable `polling` on the rule. Polling uses Feishu/Lark `im.v1.message.list` to scan recent messages in the configured `chatIds`, deduplicates by `message_id`, and replies to the original message/topic when a rule matches. The app must be in the group and must have permission to read all group messages.
+If the platform does not deliver unmentioned bot/app messages to this bot, enable `polling` on the rule. Polling uses Feishu/Lark `im.v1.message.list` to scan recent messages in the configured `chatIds`, deduplicates by `message_id`, and replies to the original message/topic when a rule matches. On startup the first poll warms the dedupe cache without queueing matches, so restarts do not replay recent alarm cards; set `pollCatchUpOnStart` to `true` only if you want that catch-up behavior. The app must be in the group and must have permission to read all group messages.
 
 This is a profile-field snippet. Do not replace the whole `config.json`; edit the matching profile's `preferences` field.
 
@@ -185,7 +185,8 @@ This is a profile-field snippet. Do not replace the whole `config.json`; edit th
         "polling": true,
         "pollIntervalSeconds": 30,
         "pollLookbackSeconds": 180,
-        "pollPageSize": 20
+        "pollPageSize": 20,
+        "pollCatchUpOnStart": false
       }
     ]
   }

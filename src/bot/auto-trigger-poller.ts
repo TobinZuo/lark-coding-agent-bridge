@@ -41,6 +41,11 @@ interface PollableRule {
   pollIntervalSeconds: number;
   pollLookbackSeconds: number;
   pollPageSize: number;
+  pollCatchUpOnStart: boolean;
+}
+
+interface PollAutoTriggersOptions {
+  startupWarmup?: boolean;
 }
 
 type ListedMessageItem = Omit<ApiMessageItem, 'mentions' | 'sender'> & {
@@ -99,11 +104,11 @@ export function startAutoTriggerPoller(deps: AutoTriggerPollerDeps): AutoTrigger
   let stopped = false;
   let inFlight = false;
 
-  const runOnce = async (): Promise<number> => {
+  const runOnce = async (options: PollAutoTriggersOptions = {}): Promise<number> => {
     if (stopped || inFlight) return 0;
     inFlight = true;
     try {
-      return await pollAutoTriggersOnce({ ...deps, seen, now });
+      return await pollAutoTriggersOnce({ ...deps, seen, now }, options);
     } catch (err) {
       log.warn('auto-trigger-poll', 'failed', {
         err: err instanceof Error ? err.message : String(err),
@@ -115,7 +120,7 @@ export function startAutoTriggerPoller(deps: AutoTriggerPollerDeps): AutoTrigger
   };
 
   const timer = setInterval(() => void runOnce(), intervalMs);
-  void runOnce();
+  void runOnce({ startupWarmup: true });
   log.info('auto-trigger-poll', 'started', {
     rules: initialRules.length,
     intervalMs,
@@ -127,11 +132,14 @@ export function startAutoTriggerPoller(deps: AutoTriggerPollerDeps): AutoTrigger
       clearInterval(timer);
       log.info('auto-trigger-poll', 'stopped');
     },
-    pollNow: runOnce,
+    pollNow: () => runOnce(),
   };
 }
 
-export async function pollAutoTriggersOnce(deps: AutoTriggerPollerDeps): Promise<number> {
+export async function pollAutoTriggersOnce(
+  deps: AutoTriggerPollerDeps,
+  options: PollAutoTriggersOptions = {},
+): Promise<number> {
   const rules = pollableRules(deps.controls.cfg);
   if (rules.length === 0) return 0;
 
@@ -166,6 +174,14 @@ export async function pollAutoTriggersOnce(deps: AutoTriggerPollerDeps): Promise
         botOpenId: deps.channel.botIdentity?.openId,
       });
       if (!match || match.rule !== rule.rule) continue;
+      if (options.startupWarmup && !rule.pollCatchUpOnStart) {
+        log.info('auto-trigger-poll', 'warmup-seen', {
+          chatId: msg.chatId,
+          messageId: msg.messageId,
+          rule: match.ruleName,
+        });
+        continue;
+      }
 
       const mode = await deps.chatModeCache.resolve(deps.channel, msg.chatId);
       const scope = mode === 'topic' && msg.threadId ? `${msg.chatId}:${msg.threadId}` : msg.chatId;
@@ -196,6 +212,7 @@ function pollableRules(cfg: AppConfig): PollableRule[] {
         pollIntervalSeconds: rule.pollIntervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS,
         pollLookbackSeconds: rule.pollLookbackSeconds ?? DEFAULT_POLL_LOOKBACK_SECONDS,
         pollPageSize: rule.pollPageSize ?? DEFAULT_POLL_PAGE_SIZE,
+        pollCatchUpOnStart: rule.pollCatchUpOnStart === true,
       });
     }
   }

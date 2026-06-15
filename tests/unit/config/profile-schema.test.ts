@@ -136,6 +136,7 @@ describe('profile schema', () => {
             pollIntervalSeconds: 10,
             pollLookbackSeconds: 300,
             pollPageSize: 30,
+            pollCatchUpOnStart: true,
             ignored: 'field',
           },
           { name: 'no matcher' },
@@ -159,6 +160,7 @@ describe('profile schema', () => {
         pollIntervalSeconds: 10,
         pollLookbackSeconds: 300,
         pollPageSize: 30,
+        pollCatchUpOnStart: true,
       },
     ]);
   });

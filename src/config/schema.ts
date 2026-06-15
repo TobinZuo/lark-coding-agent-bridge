@@ -121,6 +121,11 @@ export interface AutoTriggerRule {
   pollLookbackSeconds?: number;
   /** Number of recent messages to request per chat/rule. Default 20; clamped to 1-50. */
   pollPageSize?: number;
+  /**
+   * Queue matching messages found during the startup warm-up poll. Default false
+   * so restarts do not replay recent alarm cards.
+   */
+  pollCatchUpOnStart?: boolean;
 }
 
 export interface AppPreferences {

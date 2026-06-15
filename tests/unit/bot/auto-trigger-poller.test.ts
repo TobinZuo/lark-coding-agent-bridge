@@ -8,6 +8,7 @@ import type { ChatModeCache } from '../../../src/bot/chat-mode-cache';
 import type { PendingQueue } from '../../../src/bot/pending-queue';
 import type { Controls } from '../../../src/commands';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema';
+import type { AutoTriggerRule } from '../../../src/config/schema';
 
 const app = {
   id: 'cli_test',
@@ -53,6 +54,27 @@ describe('auto trigger poller', () => {
     expect(h.pending.push).toHaveBeenCalledTimes(1);
   });
 
+  it('warms up startup history without queuing by default', async () => {
+    const list = vi.fn(async () => ({ data: { items: [alarmItem()] } }));
+    const h = harness(list, 'topic');
+
+    expect(await pollAutoTriggersOnce(h, { startupWarmup: true })).toBe(0);
+    expect(await pollAutoTriggersOnce(h)).toBe(0);
+
+    expect(h.pending.push).not.toHaveBeenCalled();
+  });
+
+  it('can catch up startup history when explicitly configured', async () => {
+    const list = vi.fn(async () => ({ data: { items: [alarmItem()] } }));
+    const h = harness(list, 'topic', new RecentMessageSet(), {
+      pollCatchUpOnStart: true,
+    });
+
+    expect(await pollAutoTriggersOnce(h, { startupWarmup: true })).toBe(1);
+
+    expect(h.pending.push).toHaveBeenCalledTimes(1);
+  });
+
   it('continues through paginated list results', async () => {
     const list = vi
       .fn()
@@ -76,6 +98,7 @@ function harness(
   list: ReturnType<typeof vi.fn>,
   chatMode: 'group' | 'topic',
   seen = new RecentMessageSet(),
+  ruleOverrides: Partial<AutoTriggerRule> = {},
 ): {
   channel: LarkChannel;
   controls: Controls;
@@ -105,6 +128,7 @@ function harness(
           pollIntervalSeconds: 10,
           pollLookbackSeconds: 60,
           pollPageSize: 10,
+          ...ruleOverrides,
         },
       ],
     },

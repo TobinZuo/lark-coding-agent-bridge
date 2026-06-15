@@ -164,7 +164,7 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 
 profile 可以配置 `preferences.autoTriggers`，用于 Argos 告警自动分析这类范围很窄的卡片工作流。自动触发仍然先经过正常访问控制，所以群必须在 `access.allowedChats` 里（或发送者是 owner/admin）。规则命中时，只对这一条消息绕过群聊 `@bot` 要求；普通群聊消息仍然保持静默。
 
-如果飞书/Lark 不会把未 @ 本 bot 的其它 bot/app 消息投递过来，就在规则上开启 `polling`。轮询会用 `im.v1.message.list` 扫描配置的 `chatIds` 最近消息，按 `message_id` 去重；规则命中后回复到原消息/话题下面。应用必须在群内，并且需要有读取群内全部消息的权限。
+如果飞书/Lark 不会把未 @ 本 bot 的其它 bot/app 消息投递过来，就在规则上开启 `polling`。轮询会用 `im.v1.message.list` 扫描配置的 `chatIds` 最近消息，按 `message_id` 去重；规则命中后回复到原消息/话题下面。启动后的第一轮只预热去重缓存，不会把最近窗口内的历史告警入队分析；只有显式设置 `pollCatchUpOnStart: true` 才会补处理启动前窗口内的消息。应用必须在群内，并且需要有读取群内全部消息的权限。
 
 下面只是 profile 里的字段片段，不要整段覆盖 `config.json`；请改对应 profile 下的 `preferences` 字段。
 
@@ -185,7 +185,8 @@ profile 可以配置 `preferences.autoTriggers`，用于 Argos 告警自动分�
         "polling": true,
         "pollIntervalSeconds": 30,
         "pollLookbackSeconds": 180,
-        "pollPageSize": 20
+        "pollPageSize": 20,
+        "pollCatchUpOnStart": false
       }
     ]
   }
