@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { describe, expect, it, vi } from 'vitest';
 import type { NormalizedMessage } from '@larksuite/channel';
 import {
   AutoAnswerRuntime,
@@ -8,6 +11,12 @@ import {
   normalizeIncomingMessage,
 } from '../../../src/bot/auto-answer';
 import type { AppConfig, LarkBotTriggerRule } from '../../../src/config/schema';
+
+const app = {
+  id: 'cli_test',
+  secret: '${APP_SECRET}',
+  tenant: 'feishu' as const,
+};
 
 describe('auto-answer bot rules', () => {
   it('normalizes Feishu interactive message callbacks', () => {
@@ -98,11 +107,72 @@ describe('auto-answer bot rules', () => {
     expect(isAlarmRuleRequestText('请配置这个群的告警卡片自动分析规则')).toBe(true);
     expect(isAlarmRuleRequestText('/alarm-card-rule 告警卡片 自动分析')).toBe(true);
     expect(isAlarmRuleRequestText('configure alarm card auto analysis rule')).toBe(true);
+    expect(
+      isAlarmRuleRequestText(
+        '你监听这个群的消息，对告警卡片出现后，调用lumen-aigc-infra-debug skill分析报警原因发到报警卡片话题下',
+      ),
+    ).toBe(true);
 
     expect(isAlarmRuleRequestText('出现告警卡片你就在下方根据告警卡片分析问题原因')).toBe(false);
     expect(isAlarmRuleRequestText('新的报警卡片出来，你好像没看到')).toBe(false);
     expect(isAlarmRuleRequestText('我看出现了新卡片你也没有自动分析和回复啊')).toBe(false);
     expect(isAlarmRuleRequestText('你怎么立刻就生成自动分析规则草案了。不对吧')).toBe(false);
+  });
+
+  it('drafts a non-lumen skill rule from admin natural language', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'bridge-auto-rule-'));
+    try {
+      const cfg: AppConfig = {
+        accounts: { app },
+        larkBot: { admins: ['ou_admin'] },
+      };
+      const controls = {
+        profile: 'codex',
+        configPath: join(tmp, 'config.json'),
+        cfg,
+        profileConfig: {
+          ...cfg,
+          access: { admins: ['ou_admin'], allowedUsers: [], allowedChats: [] },
+        },
+        ownerRefreshState: 'unknown',
+      };
+      const channel = { send: vi.fn(async () => {}) };
+      const runtime = new AutoAnswerRuntime(() => 1000);
+
+      const drafted = await runtime.tryHandleAdminConfig({
+        channel: channel as never,
+        controls: controls as never,
+        msg: adminMessage('监听这个群，包含支付失败的卡片出现后，调用foo-debug skill分析，发到卡片话题下'),
+      });
+      const confirmed = await runtime.tryHandleAdminConfig({
+        channel: channel as never,
+        controls: controls as never,
+        msg: adminMessage('确认规则', { mentionedBot: false }),
+      });
+
+      expect(drafted).toBe(true);
+      expect(confirmed).toBe(true);
+      expect(channel.send).toHaveBeenCalledWith(
+        'oc_alarm',
+        { markdown: expect.stringContaining('foo-debug skill') },
+        { replyTo: 'om_admin' },
+      );
+      expect(controls.cfg.larkBot?.poller).toMatchObject({
+        enabled: true,
+        chatIds: ['oc_alarm'],
+      });
+      const rule = controls.cfg.larkBot?.rules?.[0];
+      expect(rule).toMatchObject({
+        chatIds: ['oc_alarm'],
+        messageTypes: ['interactive'],
+        replyInThread: true,
+      });
+      expect(rule?.cardMatchers?.[0]).toMatchObject({ path: '$text', operator: 'contains', value: '支付失败' });
+      expect(rule?.promptTemplate).toContain('foo-debug skill');
+      expect(rule?.promptTemplate).not.toContain('lumen-aigc-infra-debug');
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });
 
@@ -150,6 +220,28 @@ function normalizedMessage(input: {
       },
       message: {
         content: input.content,
+      },
+    },
+  } as unknown as NormalizedMessage;
+}
+
+function adminMessage(content: string, options: { mentionedBot?: boolean } = {}): NormalizedMessage {
+  return {
+    messageId: 'om_admin',
+    chatId: 'oc_alarm',
+    chatType: 'group',
+    senderId: 'ou_admin',
+    content,
+    rawContentType: 'text',
+    resources: [],
+    mentionedBot: options.mentionedBot ?? true,
+    raw: {
+      sender: {
+        sender_id: { open_id: 'ou_admin' },
+        sender_type: 'user',
+      },
+      message: {
+        content: JSON.stringify({ text: content }),
       },
     },
   } as unknown as NormalizedMessage;

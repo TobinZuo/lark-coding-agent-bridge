@@ -552,11 +552,14 @@ describe('profile schema', () => {
           verificationToken: '${LARK_WEBHOOK_TOKEN}',
           encryptKey: '${LARK_WEBHOOK_ENCRYPT_KEY}',
         },
-        eventConsumer: {
+        poller: {
           enabled: true,
-          command: 'lark-cli',
-          eventKey: 'im.message.receive_v1',
-          readyTimeoutMs: 5000,
+          intervalMs: 10000,
+          overlapMs: 180000,
+          maxLookbackMs: 900000,
+          pageSize: 10,
+          chatIds: ['oc_alarm'],
+          leaderId: 'machine-a',
         },
         admins: ['ou_admin'],
         rules: [
@@ -584,11 +587,14 @@ describe('profile schema', () => {
         port: 9090,
         webhookPath: '/lark/events',
       },
-      eventConsumer: {
+      poller: {
         enabled: true,
-        command: 'lark-cli',
-        eventKey: 'im.message.receive_v1',
-        readyTimeoutMs: 5000,
+        intervalMs: 10000,
+        overlapMs: 180000,
+        maxLookbackMs: 900000,
+        pageSize: 10,
+        chatIds: ['oc_alarm'],
+        leaderId: 'machine-a',
       },
       admins: ['ou_admin'],
       rules: [

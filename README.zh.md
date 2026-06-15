@@ -162,83 +162,12 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 
 ## 群消息自动触发
 
-bridge 可以按显式规则自动把群消息交给本机 agent。默认不会监听所有闲聊；只有 `larkBot.rules` 命中的消息，或管理员在群里 `@bot` 后确认创建的规则，才会触发。
-
-有两种事件入口：
-
-- **无公网域名**：在飞书开放平台把事件订阅切到长连接模式，订阅 `im.message.receive_v1`，然后开启 `larkBot.eventConsumer.enabled`。bridge 会通过当前 profile 的 `lark-cli event consume` 消费事件。
-- **HTTP Webhook**：订阅 `im.message.receive_v1`，并把请求地址配置为公网 Webhook，例如 `https://example.com/lark/events`。本机服务默认监听 `0.0.0.0:8787/lark/events`，生产环境通常需要反向代理或内网穿透。
-
-下面只是 profile 里的字段片段，不要整段覆盖 `config.json`；请改对应 profile 下的 `larkBot` 字段。
-
-无公网域名的长连接事件消费：
-
-```json
-{
-  "larkBot": {
-    "eventConsumer": {
-      "enabled": true
-    },
-    "rules": [
-      {
-        "id": "alarm-card",
-        "enabled": true,
-        "chatIds": ["oc_xxx"],
-        "messageTypes": ["interactive"],
-        "cardMatchers": [
-          { "path": "$text", "operator": "regex", "value": "报警|告警|alarm|critical|error" }
-        ],
-        "requireMention": false,
-        "replyInThread": true,
-        "cooldownMs": 300000,
-        "settleMs": 60000,
-        "promptTemplate": "这是一张群里的报警卡片。请概括告警、判断影响面、列出可能原因，并给出排查步骤。"
-      }
-    ]
-  }
-}
-```
+bridge 可以按显式规则自动把群消息交给本机 agent。默认不会监听所有闲聊；只有 bridge 已经收到、或被 `larkBot.poller` 轮询到，并且命中 `larkBot.rules` 的消息才会触发。poller 会先对每个启用的群做一次 warm-up，然后只处理新创建的消息；bridge 重启不会回放停机期间漏掉的历史消息。
 
 `settleMs` 会延迟自动分析，并在执行前重新拉取同一个 `message_id`
 的最新内容。它用于覆盖报警卡片发送后又原地更新 RCA、ACK 等内容的场景。
 
-HTTP Webhook：
-
-```json
-{
-  "larkBot": {
-    "listener": {
-      "enabled": true,
-      "host": "0.0.0.0",
-      "port": 8787,
-      "webhookPath": "/lark/events",
-      "verificationToken": "${LARK_EVENT_VERIFY_TOKEN}",
-      "encryptKey": "${LARK_EVENT_ENCRYPT_KEY}"
-    },
-    "admins": ["ou_xxx"],
-    "dedupeTtlMs": 600000,
-    "defaultReplyMode": "markdown",
-    "rules": [
-      {
-        "id": "alarm-card",
-        "enabled": true,
-        "chatIds": ["oc_xxx"],
-        "messageTypes": ["interactive"],
-        "cardMatchers": [
-          { "path": "$text", "operator": "regex", "value": "报警|告警|alarm|critical|error" }
-        ],
-        "requireMention": false,
-        "replyInThread": true,
-        "cooldownMs": 300000,
-        "settleMs": 60000,
-        "promptTemplate": "这是一张群里的报警卡片。请概括告警、判断影响面、列出可能原因，并给出排查步骤。"
-      }
-    ]
-  }
-}
-```
-
-管理员也可以在目标群里 `@bot` 说“这个群里的报警卡片，每出现一个你就得分析一次”。bot 会先回复规则草案；管理员再回复“确认报警卡片规则”后，规则才会写入当前 profile。
+管理员也可以在目标群里 `@bot` 直接描述监听任务，例如“监听这个群的消息，对告警卡片出现后，调用 lumen-aigc-infra-debug skill 分析报警原因发到报警卡片话题下”。bot 会把目标改写成可执行的注入 prompt，并先回复规则草案，草案会展示触发条件、处理方式和回复位置；管理员再回复“确认规则”后，规则会写入当前 profile，同时启用 `larkBot.poller` 并把当前群加入 `poller.chatIds`。这不是固定的告警模板，也可以解析“包含 XXX 的卡片”“所有卡片”“调用 foo-debug skill”等明确规则。
 
 ## lark-cli 身份策略
 

@@ -70,7 +70,7 @@ import {
   normalizedMessageFromIncoming,
 } from './auto-answer';
 import { startWebhookListener, type WebhookListener } from './webhook-listener';
-import { startLarkEventConsumer, type LarkEventConsumer } from './event-consumer';
+import { startLarkMessagePoller, type LarkMessagePoller } from './message-poller';
 
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
@@ -175,17 +175,7 @@ export interface StartChannelDeps {
   sessionCatalog?: SessionCatalog;
   workspaces: WorkspaceStore;
   controls: Controls;
-  appPaths?: Pick<
-    AppPaths,
-    | 'secretsFile'
-    | 'keystoreSaltFile'
-    | 'mediaDir'
-    | 'rootDir'
-    | 'profile'
-    | 'configFile'
-    | 'larkCliConfigDir'
-    | 'larkCliSourceConfigFile'
-  >;
+  appPaths?: Pick<AppPaths, 'secretsFile' | 'keystoreSaltFile' | 'mediaDir'>;
 }
 
 export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
@@ -429,10 +419,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       ).catch((err) => log.fail('webhook-intake', err));
     },
   });
-  const eventConsumer = await startLarkEventConsumer({
-    cfg,
-    appPaths: deps.appPaths,
-    configPath: controls.configPath,
+  const messagePoller = startLarkMessagePoller({
+    channel,
+    controls,
     botOpenId: channel.botIdentity?.openId,
     onMessage: async (msg) => {
       await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
@@ -453,11 +442,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           autoSettleTimers,
           autoOnly: true,
         }),
-      ).catch((err) => log.fail('event-consumer-intake', err));
+      ).catch((err) => log.fail('poller-intake', err));
     },
-  }).catch((err) => {
-    log.fail('event-consumer', err, { step: 'start' });
-    return undefined;
   });
 
   const identity = channel.botIdentity;
@@ -500,7 +486,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       knownChatsRefresh.stop();
       keepalive.stop();
       await stopWebhookListener(webhookListener);
-      await stopEventConsumer(eventConsumer);
+      stopMessagePoller(messagePoller);
       for (const timer of autoSettleTimers) clearTimeout(timer);
       autoSettleTimers.clear();
       pending.cancelAll();
@@ -556,12 +542,12 @@ async function stopWebhookListener(listener: WebhookListener | undefined): Promi
   }
 }
 
-async function stopEventConsumer(consumer: LarkEventConsumer | undefined): Promise<void> {
-  if (!consumer) return;
+function stopMessagePoller(poller: LarkMessagePoller | undefined): void {
+  if (!poller) return;
   try {
-    await consumer.stop();
+    poller.stop();
   } catch (err) {
-    log.fail('event-consumer', err, { step: 'stop' });
+    log.fail('message-poller', err, { step: 'stop' });
   }
 }
 

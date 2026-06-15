@@ -217,7 +217,7 @@ function normalizeLarkBot(input: unknown): LarkBotConfig | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
   const raw = input as LarkBotConfig;
   const listener = normalizeLarkBotListener(raw.listener);
-  const eventConsumer = normalizeLarkBotEventConsumer(raw.eventConsumer);
+  const poller = normalizeLarkBotPoller(raw.poller);
   const rules = Array.isArray(raw.rules)
     ? raw.rules
         .map(normalizeLarkBotRule)
@@ -231,7 +231,7 @@ function normalizeLarkBot(input: unknown): LarkBotConfig | undefined {
   const defaultReplyMode = isMessageReply(raw.defaultReplyMode) ? raw.defaultReplyMode : undefined;
   const out: LarkBotConfig = {
     ...(listener ? { listener } : {}),
-    ...(eventConsumer ? { eventConsumer } : {}),
+    ...(poller ? { poller } : {}),
     ...(rules && rules.length > 0 ? { rules } : {}),
     ...(admins.length > 0 ? { admins } : {}),
     ...(defaultReplyMode ? { defaultReplyMode } : {}),
@@ -240,19 +240,24 @@ function normalizeLarkBot(input: unknown): LarkBotConfig | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function normalizeLarkBotEventConsumer(
-  input: LarkBotConfig['eventConsumer'] | undefined,
-): LarkBotConfig['eventConsumer'] | undefined {
+function normalizeLarkBotPoller(input: LarkBotConfig['poller'] | undefined): LarkBotConfig['poller'] | undefined {
   if (!input || typeof input !== 'object') return undefined;
-  const readyTimeoutMs =
-    typeof input.readyTimeoutMs === 'number' && Number.isFinite(input.readyTimeoutMs) && input.readyTimeoutMs > 0
-      ? Math.floor(input.readyTimeoutMs)
+  const intervalMs = positiveInteger(input.intervalMs);
+  const overlapMs = positiveInteger(input.overlapMs);
+  const maxLookbackMs = positiveInteger(input.maxLookbackMs);
+  const pageSize =
+    typeof input.pageSize === 'number' && Number.isFinite(input.pageSize) && input.pageSize > 0
+      ? Math.min(50, Math.floor(input.pageSize))
       : undefined;
-  const out: NonNullable<LarkBotConfig['eventConsumer']> = {
+  const chatIds = stringArray(input.chatIds);
+  const out: NonNullable<LarkBotConfig['poller']> = {
     ...(typeof input.enabled === 'boolean' ? { enabled: input.enabled } : {}),
-    ...(typeof input.command === 'string' && input.command.trim() ? { command: input.command.trim() } : {}),
-    ...(typeof input.eventKey === 'string' && input.eventKey.trim() ? { eventKey: input.eventKey.trim() } : {}),
-    ...(readyTimeoutMs ? { readyTimeoutMs } : {}),
+    ...(intervalMs ? { intervalMs } : {}),
+    ...(overlapMs ? { overlapMs } : {}),
+    ...(maxLookbackMs ? { maxLookbackMs } : {}),
+    ...(pageSize ? { pageSize } : {}),
+    ...(chatIds.length > 0 ? { chatIds } : {}),
+    ...(typeof input.leaderId === 'string' && input.leaderId.trim() ? { leaderId: input.leaderId.trim() } : {}),
   };
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -283,6 +288,12 @@ function normalizeLarkBotListener(input: LarkBotConfig['listener'] | undefined):
     ...(maxBodyBytes ? { maxBodyBytes } : {}),
     ...(eventMaxAgeMs ? { eventMaxAgeMs } : {}),
   };
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
 }
 
 function normalizeLarkBotRule(input: unknown): LarkBotTriggerRule | undefined {

@@ -98,11 +98,14 @@ export interface LarkBotListenerConfig {
   eventMaxAgeMs?: number;
 }
 
-export interface LarkBotEventConsumerConfig {
+export interface LarkBotPollerConfig {
   enabled?: boolean;
-  command?: string;
-  eventKey?: string;
-  readyTimeoutMs?: number;
+  intervalMs?: number;
+  overlapMs?: number;
+  maxLookbackMs?: number;
+  pageSize?: number;
+  chatIds?: string[];
+  leaderId?: string;
 }
 
 export interface LarkBotTextMatcher {
@@ -139,7 +142,7 @@ export interface LarkBotTriggerRule {
 
 export interface LarkBotConfig {
   listener?: LarkBotListenerConfig;
-  eventConsumer?: LarkBotEventConsumerConfig;
+  poller?: LarkBotPollerConfig;
   rules?: LarkBotTriggerRule[];
   admins?: string[];
   defaultReplyMode?: MessageReplyMode;

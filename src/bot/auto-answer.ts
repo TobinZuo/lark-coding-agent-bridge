@@ -5,6 +5,7 @@ import type {
   AppConfig,
   LarkBotCardMatcher,
   LarkBotConfig,
+  LarkBotMessageType,
   LarkBotTextMatcher,
   LarkBotTriggerRule,
 } from '../config/schema';
@@ -20,7 +21,7 @@ import { log } from '../core/logger';
 
 const DEFAULT_DEDUPE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_EVENT_MAX_AGE_MS = 5 * 60 * 1000;
-const ALARM_RULE_ID_PREFIX = 'auto-alarm-card';
+const AUTO_RULE_ID_PREFIX = 'auto-rule';
 
 export interface IncomingMessage {
   messageId: string;
@@ -52,6 +53,29 @@ export interface RuleMatch {
 interface DraftRule {
   rule: LarkBotTriggerRule;
   createdAt: number;
+  summary: DraftRuleSummary;
+  pollerChatId?: string;
+}
+
+interface DraftRuleSummary {
+  trigger: string;
+  analysis: string;
+  reply: string;
+}
+
+interface TriggerSpec {
+  idHint: string;
+  summary: string;
+  messageTypes?: LarkBotMessageType[];
+  textMatchers?: LarkBotTriggerRule['textMatchers'];
+  cardMatchers?: LarkBotTriggerRule['cardMatchers'];
+  settleMs?: number;
+}
+
+interface SkillSpec {
+  name?: string;
+  promptTemplate: string;
+  summary: string;
 }
 
 export class AutoAnswerRuntime {
@@ -66,37 +90,64 @@ export class AutoAnswerRuntime {
     msg: NormalizedMessage;
   }): Promise<boolean> {
     const { channel, controls, msg } = input;
-    if (!isAdminConfigCandidate(msg)) return false;
     if (!isAutoAnswerAdmin(controls, msg.senderId)) return false;
 
     const key = draftKey(msg);
-    if (isConfirmAlarmRuleText(msg.content)) {
+    const confirm = isConfirmAlarmRuleText(msg.content);
+    if (!isAdminConfigCandidate(msg) && !(confirm && this.drafts.has(key))) return false;
+    if (confirm) {
       const draft = this.drafts.get(key);
       if (!draft) {
-        await replyToMessage(channel, msg, '没有待确认的报警卡片规则草案。请先描述要监听的规则。');
+        await replyToMessage(channel, msg, '没有待确认的自动监听规则草案。请先描述要监听什么、触发后怎么处理。');
         return true;
       }
-      await saveLarkBotRule(controls, draft.rule);
+      await saveLarkBotRule(controls, draft.rule, {
+        ...(draft.pollerChatId ? { pollerChatId: draft.pollerChatId } : {}),
+      });
       this.drafts.delete(key);
       await replyToMessage(
         channel,
         msg,
-        `已启用规则 ${draft.rule.id}。之后本群出现报警卡片时，我会自动分析并回复。`,
+        [
+          `已启用规则 ${draft.rule.id}。`,
+          draft.pollerChatId ? '当前群已加入轮询监听；从下一轮轮询开始，只处理新出现的消息。' : '',
+          `触发: ${draft.summary.trigger}`,
+          `处理: ${draft.summary.analysis}`,
+          `回复: ${draft.summary.reply}`,
+        ].filter(Boolean).join('\n'),
       );
       return true;
     }
 
-    if (!isAlarmRuleRequestText(msg.content)) return false;
-    const rule = buildAlarmCardRule(msg);
-    this.drafts.set(key, { rule, createdAt: this.now() });
+    if (!isAutoRuleRequestText(msg.content)) return false;
+    const draft = buildAutoAnswerRuleDraft(msg);
+    if (!draft) {
+      await replyToMessage(
+        channel,
+        msg,
+        [
+          '我还没能可靠解析这条自动监听规则，所以没有启用。',
+          '请明确说明触发对象，例如“告警卡片”“包含 XXX 的卡片”“所有卡片”，以及触发后要调用哪个 skill 或怎么分析。',
+        ].join('\n'),
+      );
+      return true;
+    }
+    this.drafts.set(key, {
+      ...draft,
+      ...(msg.chatType === 'group' ? { pollerChatId: msg.chatId } : {}),
+      createdAt: this.now(),
+    });
     await replyToMessage(
       channel,
       msg,
       [
-        '已生成报警卡片自动分析规则草案，尚未启用。',
-        `规则: ${rule.id}`,
-        '范围: 当前群的 interactive 报警/告警卡片',
-        '确认启用请回复: 确认报警卡片规则',
+        '已生成自动监听规则草案，尚未启用。',
+        `规则: ${draft.rule.id}`,
+        `触发: ${draft.summary.trigger}`,
+        '监听: 当前群加入 poller，仅处理规则启用后新出现的消息',
+        `处理: ${draft.summary.analysis}`,
+        `回复: ${draft.summary.reply}`,
+        '确认启用请回复: 确认规则',
       ].join('\n'),
     );
     return true;
@@ -332,51 +383,236 @@ function isAutoAnswerAdmin(controls: Controls, senderId: string): boolean {
 }
 
 export function isAlarmRuleRequestText(text: string): boolean {
+  return isAutoRuleRequestText(text);
+}
+
+export function isAutoRuleRequestText(text: string): boolean {
   const normalized = text.trim();
-  if (!/报警卡片|告警卡片|alarm card|alert card/i.test(normalized)) return false;
   if (/^\/(?:auto-)?(?:alarm|alert)-card(?:-rule)?\b/i.test(normalized)) return true;
+  if (/^\/(?:auto-)?(?:rule|listen|watch)\b/i.test(normalized)) return true;
 
-  const hasChineseSetupVerb = /创建|新建|新增|添加|配置|设置|设定|启用|生成/.test(normalized);
-  const hasChineseRuleIntent = /规则|自动分析|自动回复|自动处理|监听/.test(normalized);
-  if (hasChineseSetupVerb && hasChineseRuleIntent) return true;
+  const hasChineseSetupVerb = /创建|新建|新增|添加|配置|设置|设定|启用|生成|监听|监控/.test(normalized);
+  const hasChineseTarget = /消息|卡片|文本|富文本|报警|告警|关键词|包含/.test(normalized);
+  const hasChineseAction = /规则|自动分析|自动回复|自动处理|监听|调用|使用|skill|分析|回复/.test(normalized);
+  if (hasChineseSetupVerb && hasChineseTarget && hasChineseAction) return true;
 
-  const hasEnglishSetupVerb = /\b(?:create|add|configure|setup|set up|enable|generate)\b/i.test(normalized);
-  const hasEnglishRuleIntent = /\b(?:rule|auto(?:matic)?(?:ly)?|analysis|analyze|reply|monitor|watch)\b/i.test(normalized);
-  return hasEnglishSetupVerb && hasEnglishRuleIntent;
+  const hasEnglishSetupVerb = /\b(?:create|add|configure|setup|set up|enable|generate|monitor|watch)\b/i.test(normalized);
+  const hasEnglishTarget = /\b(?:message|card|text|post|alarm|alert|keyword|contains)\b/i.test(normalized);
+  const hasEnglishAction = /\b(?:rule|auto(?:matic)?(?:ly)?|analysis|analyze|reply|monitor|watch|use|call|skill)\b/i.test(normalized);
+  return hasEnglishSetupVerb && hasEnglishTarget && hasEnglishAction;
 }
 
 function isConfirmAlarmRuleText(text: string): boolean {
-  return /确认.*报警卡片规则|启用.*报警卡片规则|confirm.*alarm/i.test(text);
+  return /^确认(?:启用)?(?:规则|监听)?$/.test(text.trim())
+    || /确认.*(?:报警卡片|告警卡片|自动监听|自动分析)?.*规则|启用.*(?:报警卡片|告警卡片|自动监听|自动分析)?.*规则|confirm.*(?:alarm|rule)/i.test(text);
 }
 
-function buildAlarmCardRule(msg: NormalizedMessage): LarkBotTriggerRule {
-  return {
-    id: `${ALARM_RULE_ID_PREFIX}-${shortHash(msg.chatId)}`,
+function buildAutoAnswerRuleDraft(msg: NormalizedMessage): Omit<DraftRule, 'createdAt' | 'pollerChatId'> | undefined {
+  const trigger = inferTriggerSpec(msg.content);
+  if (!trigger) return undefined;
+  const goal = inferActionGoal(msg.content, trigger);
+  const skill = inferSkillSpec(msg.content, trigger, goal);
+  const replyInThread = shouldReplyInThread(msg.content);
+  const rule: LarkBotTriggerRule = {
+    id: `${AUTO_RULE_ID_PREFIX}-${trigger.idHint}-${shortHash(`${msg.chatId}:${trigger.idHint}:${skill.name ?? ''}`, 8)}`,
     enabled: true,
     chatIds: [msg.chatId],
-    messageTypes: ['interactive'],
-    cardMatchers: [
-      {
-        path: '$text',
-        operator: 'regex',
-        value: '报警|告警|alarm|alert|critical|warning|error',
-        caseSensitive: false,
-      },
-    ],
+    ...(trigger.messageTypes ? { messageTypes: trigger.messageTypes } : {}),
+    ...(trigger.textMatchers ? { textMatchers: trigger.textMatchers } : {}),
+    ...(trigger.cardMatchers ? { cardMatchers: trigger.cardMatchers } : {}),
     requireMention: false,
-    promptTemplate:
-      '这是一张群里的报警卡片。请结合卡片内容做一次值班分析：概括告警、判断影响面、列出可能原因、给出排查步骤和下一步建议。',
-    replyInThread: true,
+    promptTemplate: skill.promptTemplate,
+    replyInThread,
     cooldownMs: 5 * 60 * 1000,
-    settleMs: 60 * 1000,
+    ...(trigger.settleMs ? { settleMs: trigger.settleMs } : {}),
+  };
+  return {
+    rule,
+    summary: {
+      trigger: trigger.summary,
+      analysis: skill.summary,
+      reply: replyInThread ? '原消息/话题下' : '原消息下',
+    },
   };
 }
 
-async function saveLarkBotRule(controls: Controls, rule: LarkBotTriggerRule): Promise<void> {
+function inferTriggerSpec(text: string): TriggerSpec | undefined {
+  if (/报警卡片|告警卡片|alarm card|alert card/i.test(text)) {
+    return {
+      idHint: 'alarm-card',
+      summary: '当前群 interactive 告警/报警卡片',
+      messageTypes: ['interactive'],
+      cardMatchers: [
+        {
+          path: '$text',
+          operator: 'regex',
+          value: '报警|告警|alarm|alert|critical|warning|error',
+          caseSensitive: false,
+        },
+      ],
+      settleMs: 60 * 1000,
+    };
+  }
+
+  const messageTypes = inferMessageTypes(text);
+  if (messageTypes.includes('interactive')) {
+    const keyword = extractTriggerKeyword(text);
+    if (keyword) {
+      return {
+        idHint: `card-${shortHash(keyword, 6)}`,
+        summary: `当前群 interactive 卡片，卡片文本包含“${keyword}”`,
+        messageTypes,
+        cardMatchers: [{ path: '$text', operator: 'contains', value: keyword, caseSensitive: false }],
+        settleMs: 60 * 1000,
+      };
+    }
+    if (/所有|全部|任意|任何|all|any/i.test(text)) {
+      return {
+        idHint: 'all-cards',
+        summary: '当前群所有 interactive 卡片',
+        messageTypes,
+        settleMs: 60 * 1000,
+      };
+    }
+    return undefined;
+  }
+
+  const keyword = extractTriggerKeyword(text);
+  if (keyword) {
+    return {
+      idHint: `message-${shortHash(keyword, 6)}`,
+      summary: `当前群消息文本包含“${keyword}”`,
+      ...(messageTypes.length > 0 ? { messageTypes } : {}),
+      textMatchers: [{ type: 'contains', value: keyword, caseSensitive: false }],
+    };
+  }
+  return undefined;
+}
+
+function inferMessageTypes(text: string): LarkBotMessageType[] {
+  const types: LarkBotMessageType[] = [];
+  if (/卡片|card/i.test(text)) types.push('interactive');
+  if (/富文本|post/i.test(text)) types.push('post');
+  if (/文本|文字|text/i.test(text)) types.push('text');
+  return [...new Set(types)];
+}
+
+function extractTriggerKeyword(text: string): string | undefined {
+  const explicit = text.match(/(?:包含|关键词(?:是|为)?|keyword(?: is)?|contains)\s*["“']?([^"”'，,。；;\n]{2,40})/i);
+  const explicitKeyword = cleanupTriggerKeyword(explicit?.[1]);
+  if (explicitKeyword) return explicitKeyword;
+
+  const phrase = text.match(/(?:对|当|每当|如果|收到|出现)\s*([^，,。；;\n]{2,40}?)(?:出现后|出现时|时|后|就|调用|使用|分析|回复|发到|$)/);
+  return cleanupTriggerKeyword(phrase?.[1]);
+}
+
+function cleanupTriggerKeyword(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const cleaned = value
+    .replace(/^这个群(?:里|的)?/, '')
+    .replace(/^群(?:里|的)?/, '')
+    .replace(/^(所有|全部|任意|任何)/, '')
+    .replace(/(?:的)?(?:消息|卡片|文本|出现|以后|之后|时候|时|后)+$/g, '')
+    .replace(/的$/g, '')
+    .trim();
+  if (!cleaned || cleaned.length < 2) return undefined;
+  if (/^(这个|当前|本群|消息|卡片|文本)$/.test(cleaned)) return undefined;
+  return cleaned;
+}
+
+function inferSkillSpec(text: string, trigger: TriggerSpec, goal: string): SkillSpec {
+  const skillName = extractSkillName(text);
+  if (/lumen-aigc-infra-debug|lumen/i.test(skillName ?? text)) {
+    return {
+      name: 'lumen-aigc-infra-debug',
+      promptTemplate: lumenAlarmPrompt(goal),
+      summary: `优先使用 lumen-aigc-infra-debug skill 做只读诊断；目标: ${goal}`,
+    };
+  }
+  if (skillName) {
+    return {
+      name: skillName,
+      promptTemplate: genericSkillPrompt(skillName, trigger.summary, goal),
+      summary: `优先使用 ${skillName} skill 处理；目标: ${goal}`,
+    };
+  }
+  return {
+    promptTemplate: genericAutoAnswerPrompt(trigger.summary, goal),
+    summary: `使用默认自动分析提示；目标: ${goal}`,
+  };
+}
+
+function inferActionGoal(text: string, trigger: TriggerSpec): string {
+  const explicit = text.match(/(?:调用|使用|用|use|call)\s+[A-Za-z0-9][A-Za-z0-9_.-]*(?:\s*skill)?\s*([^，。；;\n]{2,80})/i);
+  const fallback = text.match(/(?:出现后|出现时|后|时|then)\s*([^，。；;\n]{2,100})/i);
+  const goal = cleanupActionGoal(explicit?.[1]) ?? cleanupActionGoal(fallback?.[1]);
+  return goal ?? `根据${trigger.summary}进行分析并给出结论和建议`;
+}
+
+function cleanupActionGoal(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const cleaned = value
+    .replace(/^(来|去|帮我|请|就|并|然后|，|,|\s)+/, '')
+    .replace(/(?:发到|回复到|回到).*(?:话题|thread|下)$/i, '')
+    .trim();
+  if (!cleaned || cleaned.length < 2) return undefined;
+  return cleaned;
+}
+
+function extractSkillName(text: string): string | undefined {
+  const called = text.match(/(?:调用|使用|用|use|call)\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?:\s*skill)?/i);
+  const skill = called?.[1] ?? text.match(/([A-Za-z0-9][A-Za-z0-9_.-]*)\s*skill/i)?.[1];
+  if (!skill) return undefined;
+  if (/^(skill|message|card|text|post|alarm|alert)$/i.test(skill)) return undefined;
+  return skill;
+}
+
+function shouldReplyInThread(text: string): boolean {
+  if (/不要.*(?:话题|thread)|原消息下|top[- ]?level/i.test(text)) return false;
+  return /话题|thread|原消息|卡片下|下面|reply/i.test(text) || /卡片|card/i.test(text);
+}
+
+const DEFAULT_AUTO_ANSWER_PROMPT =
+  '这是一条自动触发的飞书群消息。请结合消息内容和触发规则进行分析，先给结论，再给证据、可能原因和下一步建议。';
+
+function genericAutoAnswerPrompt(triggerSummary: string, goal: string): string {
+  return [
+    DEFAULT_AUTO_ANSWER_PROMPT,
+    `触发规则: ${triggerSummary}`,
+    `用户配置目标: ${goal}`,
+    '请把这个目标改写成针对当前消息的执行任务来完成，不要重新创建或修改监听规则。',
+  ].join('\n');
+}
+
+function genericSkillPrompt(skillName: string, triggerSummary: string, goal: string): string {
+  return [
+    '这是一条自动触发的飞书群消息。',
+    `请优先使用 ${skillName} skill 处理这条消息；如果该 skill 不适用，请说明原因并基于消息内容给出分析。`,
+    `触发规则: ${triggerSummary}`,
+    `用户配置目标: ${goal}`,
+    '回复时先给结论，再给证据和建议动作。不要执行有副作用的操作，除非用户明确要求。',
+  ].join('\n');
+}
+
+function lumenAlarmPrompt(goal: string): string {
+  return [
+    '这是一张自动触发的飞书告警卡片。',
+    '请优先使用 lumen-aigc-infra-debug skill，以只读方式分析报警原因。',
+    `用户配置目标: ${goal}`,
+    '改写后的执行要求: 提取卡片里的 PSM/服务名/region/时间窗口/rule_id/详情链接等证据，查询相关监控、日志、Argos 或 Lumen/AIGC Infra 信息，输出结论、影响面、证据链、可能原因、当前状态和建议动作。',
+    '不要自动 ACK、屏蔽、改配置或执行有副作用操作，除非用户明确要求。',
+  ].join('\n');
+}
+
+async function saveLarkBotRule(
+  controls: Controls,
+  rule: LarkBotTriggerRule,
+  options: { pollerChatId?: string } = {},
+): Promise<void> {
   await withConfigFileLock(controls.configPath, async () => {
     const root = await loadRootConfig(controls.configPath);
     if (!root) {
-      const next = upsertRule(controls.cfg.larkBot, rule);
+      const next = upsertRule(controls.cfg.larkBot, rule, options);
       controls.cfg = { ...controls.cfg, larkBot: next };
       controls.profileConfig = { ...controls.profileConfig, larkBot: next };
       await saveConfig(controls.cfg, controls.configPath);
@@ -386,7 +622,7 @@ async function saveLarkBotRule(controls: Controls, rule: LarkBotTriggerRule): Pr
     if (!profile) throw new Error(`profile not found: ${controls.profile}`);
     root.profiles[controls.profile] = {
       ...profile,
-      larkBot: upsertRule(profile.larkBot, rule),
+      larkBot: upsertRule(profile.larkBot, rule, options),
     };
     await saveRootConfig(root, controls.configPath);
     controls.profileConfig = root.profiles[controls.profile]!;
@@ -394,11 +630,23 @@ async function saveLarkBotRule(controls: Controls, rule: LarkBotTriggerRule): Pr
   });
 }
 
-function upsertRule(current: LarkBotConfig | undefined, rule: LarkBotTriggerRule): LarkBotConfig {
+function upsertRule(
+  current: LarkBotConfig | undefined,
+  rule: LarkBotTriggerRule,
+  options: { pollerChatId?: string } = {},
+): LarkBotConfig {
   const rules = [...(current?.rules ?? [])].filter((item) => item.id !== rule.id);
   rules.push(rule);
+  const poller = options.pollerChatId
+    ? {
+        ...(current?.poller ?? {}),
+        enabled: true,
+        chatIds: [...new Set([...(current?.poller?.chatIds ?? []), options.pollerChatId])],
+      }
+    : current?.poller;
   return {
     ...(current ?? {}),
+    ...(poller ? { poller } : {}),
     rules,
   };
 }
