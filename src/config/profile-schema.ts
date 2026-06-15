@@ -218,6 +218,7 @@ function normalizeLarkBot(input: unknown): LarkBotConfig | undefined {
   const raw = input as LarkBotConfig;
   const listener = normalizeLarkBotListener(raw.listener);
   const poller = normalizeLarkBotPoller(raw.poller);
+  const rulePlanner = normalizeLarkBotRulePlanner(raw.rulePlanner);
   const rules = Array.isArray(raw.rules)
     ? raw.rules
         .map(normalizeLarkBotRule)
@@ -232,10 +233,29 @@ function normalizeLarkBot(input: unknown): LarkBotConfig | undefined {
   const out: LarkBotConfig = {
     ...(listener ? { listener } : {}),
     ...(poller ? { poller } : {}),
+    ...(rulePlanner ? { rulePlanner } : {}),
     ...(rules && rules.length > 0 ? { rules } : {}),
     ...(admins.length > 0 ? { admins } : {}),
     ...(defaultReplyMode ? { defaultReplyMode } : {}),
     ...(dedupeTtlMs ? { dedupeTtlMs } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizeLarkBotRulePlanner(
+  input: LarkBotConfig['rulePlanner'] | undefined,
+): LarkBotConfig['rulePlanner'] | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const timeoutMs = positiveInteger(input.timeoutMs);
+  const maxOutputChars = positiveInteger(input.maxOutputChars);
+  const out: NonNullable<LarkBotConfig['rulePlanner']> = {
+    ...(typeof input.enabled === 'boolean' ? { enabled: input.enabled } : {}),
+    ...(typeof input.skill === 'string' && input.skill.trim() ? { skill: input.skill.trim() } : {}),
+    ...(typeof input.promptTemplate === 'string' && input.promptTemplate.trim()
+      ? { promptTemplate: input.promptTemplate.trim() }
+      : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
+    ...(maxOutputChars ? { maxOutputChars } : {}),
   };
   return Object.keys(out).length > 0 ? out : undefined;
 }

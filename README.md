@@ -168,7 +168,50 @@ The bridge can dispatch matching group messages to the local agent automatically
 running the agent. This covers alert cards that are edited in place shortly
 after delivery, for example cards that later receive RCA or ACK content.
 
-Admins can also mention the bot in the target group and describe a listener task, for example, "watch this group for alert cards and use the lumen-aigc-infra-debug skill to analyze them in the alert topic". The bot rewrites the goal into an executable injected prompt, then replies with a draft rule showing the trigger, handling behavior, and reply target. The admin must reply "确认规则" to persist the rule, enable `larkBot.poller`, and add the current chat to `poller.chatIds`. This is not a fixed alert-only template; explicit requests such as "cards containing XXX", "all cards", or "use foo-debug skill" can draft different rules.
+Admins can also mention the bot in the target group and describe a listener task, for example, "watch this group for alert cards and use the lumen-aigc-infra-debug skill to analyze them in the alert topic". Natural-language listener configuration is generated entirely by an external planner skill. The bridge only detects that the message is a listener-configuration intent, runs the planner, validates its JSON, forces the rule to the current chat, and persists it after admin confirmation.
+
+This is a profile-field snippet. Do not replace the whole `config.json` with it; edit the matching profile's `larkBot` field:
+
+```json
+{
+  "larkBot": {
+    "rulePlanner": {
+      "enabled": true,
+      "skill": "lark-listener-configurator",
+      "timeoutMs": 120000,
+      "maxOutputChars": 40000
+    }
+  }
+}
+```
+
+The external planner skill must output JSON only. The core shape is:
+
+```json
+{
+  "rule": {
+    "messageTypes": ["interactive"],
+    "cardMatchers": [
+      { "path": "$text", "operator": "regex", "value": "报警|告警|alarm" }
+    ],
+    "promptTemplate": "Full prompt injected into the agent when the rule matches",
+    "replyInThread": true,
+    "cooldownMs": 300000,
+    "settleMs": 60000
+  },
+  "poller": {
+    "intervalMs": 10000,
+    "pageSize": 20
+  },
+  "summary": {
+    "trigger": "current group alert cards",
+    "analysis": "use lumen-aigc-infra-debug skill for read-only diagnosis",
+    "reply": "original message/topic"
+  }
+}
+```
+
+The bridge discards any `chatIds` emitted by the skill and forces the current group; it also rejects overly broad "all text messages" listeners. The admin must reply "确认规则" to persist the rule, enable `larkBot.poller`, and add the current chat to `poller.chatIds`.
 
 ## lark-cli identity policy
 

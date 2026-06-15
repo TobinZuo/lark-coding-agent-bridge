@@ -11,6 +11,7 @@ import {
   normalizeIncomingMessage,
 } from '../../../src/bot/auto-answer';
 import type { AppConfig, LarkBotTriggerRule } from '../../../src/config/schema';
+import type { RulePlannerDraft } from '../../../src/bot/rule-planner';
 
 const app = {
   id: 'cli_test',
@@ -119,7 +120,7 @@ describe('auto-answer bot rules', () => {
     expect(isAlarmRuleRequestText('你怎么立刻就生成自动分析规则草案了。不对吧')).toBe(false);
   });
 
-  it('drafts a non-lumen skill rule from admin natural language', async () => {
+  it('persists a draft returned by the external rule planner', async () => {
     const tmp = await mkdtemp(join(tmpdir(), 'bridge-auto-rule-'));
     try {
       const cfg: AppConfig = {
@@ -138,11 +139,33 @@ describe('auto-answer bot rules', () => {
       };
       const channel = { send: vi.fn(async () => {}) };
       const runtime = new AutoAnswerRuntime(() => 1000);
+      const draft: RulePlannerDraft = {
+        rule: {
+          id: 'planner-rule',
+          chatIds: ['oc_alarm'],
+          messageTypes: ['interactive'],
+          cardMatchers: [{ path: '$text', operator: 'contains', value: '支付失败' }],
+          promptTemplate: 'planner generated prompt for foo-debug skill',
+          replyInThread: true,
+          settleMs: 30_000,
+        },
+        poller: {
+          intervalMs: 15_000,
+          pageSize: 10,
+        },
+        summary: {
+          trigger: '当前群支付失败卡片',
+          analysis: '使用 foo-debug skill 分析',
+          reply: '卡片话题下',
+        },
+      };
+      const planRule = vi.fn(async () => draft);
 
       const drafted = await runtime.tryHandleAdminConfig({
         channel: channel as never,
         controls: controls as never,
         msg: adminMessage('监听这个群，包含支付失败的卡片出现后，调用foo-debug skill分析，发到卡片话题下'),
+        planRule,
       });
       const confirmed = await runtime.tryHandleAdminConfig({
         channel: channel as never,
@@ -152,27 +175,66 @@ describe('auto-answer bot rules', () => {
 
       expect(drafted).toBe(true);
       expect(confirmed).toBe(true);
+      expect(planRule).toHaveBeenCalledWith(expect.objectContaining({
+        instruction: '监听这个群，包含支付失败的卡片出现后，调用foo-debug skill分析，发到卡片话题下',
+        chatId: 'oc_alarm',
+        profile: 'codex',
+      }));
       expect(channel.send).toHaveBeenCalledWith(
         'oc_alarm',
-        { markdown: expect.stringContaining('foo-debug skill') },
+        { markdown: expect.stringContaining('使用 foo-debug skill 分析') },
         { replyTo: 'om_admin' },
       );
       expect(controls.cfg.larkBot?.poller).toMatchObject({
         enabled: true,
+        intervalMs: 15_000,
+        pageSize: 10,
         chatIds: ['oc_alarm'],
       });
       const rule = controls.cfg.larkBot?.rules?.[0];
       expect(rule).toMatchObject({
+        id: 'planner-rule',
         chatIds: ['oc_alarm'],
         messageTypes: ['interactive'],
         replyInThread: true,
+        settleMs: 30_000,
       });
       expect(rule?.cardMatchers?.[0]).toMatchObject({ path: '$text', operator: 'contains', value: '支付失败' });
-      expect(rule?.promptTemplate).toContain('foo-debug skill');
-      expect(rule?.promptTemplate).not.toContain('lumen-aigc-infra-debug');
+      expect(rule?.promptTemplate).toContain('planner generated prompt');
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
+  });
+
+  it('requires an external planner for listener configuration', async () => {
+    const cfg: AppConfig = {
+      accounts: { app },
+      larkBot: { admins: ['ou_admin'] },
+    };
+    const channel = { send: vi.fn(async () => {}) };
+    const runtime = new AutoAnswerRuntime(() => 1000);
+
+    const handled = await runtime.tryHandleAdminConfig({
+      channel: channel as never,
+      controls: {
+        profile: 'codex',
+        cfg,
+        profileConfig: {
+          ...cfg,
+          access: { admins: ['ou_admin'], allowedUsers: [], allowedChats: [] },
+        },
+        ownerRefreshState: 'unknown',
+      } as never,
+      msg: adminMessage('监听这个群的告警卡片并自动分析'),
+    });
+
+    expect(handled).toBe(true);
+    expect(channel.send).toHaveBeenCalledWith(
+      'oc_alarm',
+      { markdown: expect.stringContaining('larkBot.rulePlanner.skill') },
+      { replyTo: 'om_admin' },
+    );
+    expect(cfg.larkBot?.rules).toBeUndefined();
   });
 });
 

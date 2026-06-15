@@ -561,6 +561,13 @@ describe('profile schema', () => {
           chatIds: ['oc_alarm'],
           leaderId: 'machine-a',
         },
+        rulePlanner: {
+          enabled: true,
+          skill: 'lark-listener-configurator',
+          promptTemplate: 'Plan {{instruction}}',
+          timeoutMs: 60000,
+          maxOutputChars: 12000,
+        },
         admins: ['ou_admin'],
         rules: [
           {
@@ -595,6 +602,13 @@ describe('profile schema', () => {
         pageSize: 10,
         chatIds: ['oc_alarm'],
         leaderId: 'machine-a',
+      },
+      rulePlanner: {
+        enabled: true,
+        skill: 'lark-listener-configurator',
+        promptTemplate: 'Plan {{instruction}}',
+        timeoutMs: 60000,
+        maxOutputChars: 12000,
       },
       admins: ['ou_admin'],
       rules: [

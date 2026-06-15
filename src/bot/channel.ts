@@ -65,12 +65,20 @@ import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import {
   AutoAnswerRuntime,
+  type AutoRulePlanner,
   autoAnswerMeta,
   normalizeIncomingMessage,
   normalizedMessageFromIncoming,
 } from './auto-answer';
 import { startWebhookListener, type WebhookListener } from './webhook-listener';
 import { startLarkMessagePoller, type LarkMessagePoller } from './message-poller';
+import {
+  buildRulePlannerPrompt,
+  parseRulePlannerText,
+  type RulePlannerDraft,
+  type RulePlannerRequest,
+} from './rule-planner';
+import type { RunExecution } from '../runtime/run-executor';
 
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
@@ -584,6 +592,102 @@ interface IntakeDeps {
   autoOnly?: boolean;
 }
 
+function externalRulePlannerFor(deps: IntakeDeps): AutoRulePlanner | undefined {
+  const planner = deps.controls.cfg.larkBot?.rulePlanner;
+  if (planner?.enabled !== true) return undefined;
+  return (request) => runExternalRulePlanner({ ...deps, request });
+}
+
+async function runExternalRulePlanner(input: IntakeDeps & {
+  request: RulePlannerRequest;
+}): Promise<RulePlannerDraft> {
+  const { controls, request, sessions, workspaces, executor } = input;
+  const planner = controls.cfg.larkBot?.rulePlanner;
+  if (planner?.enabled !== true) throw new Error('larkBot.rulePlanner is not enabled');
+  if (!planner.skill && !planner.promptTemplate) {
+    throw new Error('larkBot.rulePlanner.skill is required');
+  }
+
+  const prompt = buildRulePlannerPrompt(planner, request);
+  const capability =
+    controls.profileConfig.agentKind === 'codex'
+      ? codexCapability(controls.profileConfig)
+      : claudeCapability(controls.profileConfig);
+  const flow = await startRunFlow({
+    scopeId: `__auto-rule-planner:${request.chatId}:${request.messageId}`,
+    scope: {
+      source: 'im',
+      chatId: request.chatId,
+      actorId: request.senderId,
+    },
+    prompt,
+    attachments: [],
+    access: { ok: true, reason: 'allowed-admin' },
+    capability,
+    profileConfig: controls.profileConfig,
+    sessions,
+    sessionCatalog: undefined,
+    workspaces,
+    executor,
+    now: Date.now(),
+    stopGraceMs: getAgentStopGraceMs(controls.cfg),
+    observability: {
+      profile: controls.profile,
+      agent: capability.agentId,
+      source: 'auto-rule-planner',
+      stage: 'rule-planner',
+    },
+  });
+  if (!flow.ok) {
+    throw new Error(flow.rejectReason.userVisible);
+  }
+
+  const output = await collectPlannerOutput(flow.execution, {
+    timeoutMs: planner.timeoutMs ?? 120_000,
+    maxOutputChars: planner.maxOutputChars ?? 40_000,
+  });
+  const parsed = parseRulePlannerText(output, request);
+  if (!parsed.ok) throw new Error(parsed.error);
+  log.info('auto-rule-planner', 'drafted', {
+    chatId: request.chatId,
+    msgId: request.messageId,
+    ruleId: parsed.draft.rule.id,
+  });
+  return parsed.draft;
+}
+
+async function collectPlannerOutput(
+  execution: RunExecution,
+  opts: { timeoutMs: number; maxOutputChars: number },
+): Promise<string> {
+  let output = '';
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const consume = (async (): Promise<string> => {
+    for await (const event of execution.subscribe()) {
+      if (event.type === 'text') {
+        output += event.delta;
+        if (output.length > opts.maxOutputChars) {
+          throw new Error(`planner output exceeded ${opts.maxOutputChars} chars`);
+        }
+      }
+      if (event.type === 'error') throw new Error(event.message);
+      if (event.type === 'done') return output;
+    }
+    return output;
+  })();
+  const timer = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error(`planner timed out after ${opts.timeoutMs}ms`)), opts.timeoutMs);
+  });
+  try {
+    return await Promise.race([consume, timer]);
+  } catch (err) {
+    await execution.stop().catch(() => {});
+    throw err;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const {
     channel,
@@ -603,7 +707,12 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   } = deps;
   let { msg } = deps;
   if (!autoOnly) {
-    const configHandled = await autoAnswer.tryHandleAdminConfig({ channel, controls, msg });
+    const configHandled = await autoAnswer.tryHandleAdminConfig({
+      channel,
+      controls,
+      msg,
+      planRule: externalRulePlannerFor(deps),
+    });
     if (configHandled) {
       log.info('intake', 'auto-config-command', { chatId: msg.chatId, msgId: msg.messageId });
       return;

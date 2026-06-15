@@ -108,6 +108,16 @@ export interface LarkBotPollerConfig {
   leaderId?: string;
 }
 
+export interface LarkBotRulePlannerConfig {
+  enabled?: boolean;
+  /** External agent skill used to draft listener rules from admin instructions. */
+  skill?: string;
+  /** Optional full planner prompt override. Must still return the documented JSON shape. */
+  promptTemplate?: string;
+  timeoutMs?: number;
+  maxOutputChars?: number;
+}
+
 export interface LarkBotTextMatcher {
   type?: 'contains' | 'equals' | 'regex';
   value: string;
@@ -143,6 +153,7 @@ export interface LarkBotTriggerRule {
 export interface LarkBotConfig {
   listener?: LarkBotListenerConfig;
   poller?: LarkBotPollerConfig;
+  rulePlanner?: LarkBotRulePlannerConfig;
   rules?: LarkBotTriggerRule[];
   admins?: string[];
   defaultReplyMode?: MessageReplyMode;

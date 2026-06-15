@@ -167,7 +167,50 @@ bridge 可以按显式规则自动把群消息交给本机 agent。默认不会�
 `settleMs` 会延迟自动分析，并在执行前重新拉取同一个 `message_id`
 的最新内容。它用于覆盖报警卡片发送后又原地更新 RCA、ACK 等内容的场景。
 
-管理员也可以在目标群里 `@bot` 直接描述监听任务，例如“监听这个群的消息，对告警卡片出现后，调用 lumen-aigc-infra-debug skill 分析报警原因发到报警卡片话题下”。bot 会把目标改写成可执行的注入 prompt，并先回复规则草案，草案会展示触发条件、处理方式和回复位置；管理员再回复“确认规则”后，规则会写入当前 profile，同时启用 `larkBot.poller` 并把当前群加入 `poller.chatIds`。这不是固定的告警模板，也可以解析“包含 XXX 的卡片”“所有卡片”“调用 foo-debug skill”等明确规则。
+管理员也可以在目标群里 `@bot` 直接描述监听任务，例如“监听这个群的消息，对告警卡片出现后，调用 lumen-aigc-infra-debug skill 分析报警原因发到报警卡片话题下”。这类自然语言配置完全由外部配置 skill 生成规则草案；bridge 只识别“这是监听任务配置意图”、调用 planner、校验 JSON、强制限定当前群、等待管理员确认后写入配置。
+
+下面只是 profile 里的字段片段，不要整段覆盖 `config.json`；请改对应 profile 下的 `larkBot` 字段：
+
+```json
+{
+  "larkBot": {
+    "rulePlanner": {
+      "enabled": true,
+      "skill": "lark-listener-configurator",
+      "timeoutMs": 120000,
+      "maxOutputChars": 40000
+    }
+  }
+}
+```
+
+外部配置 skill 必须只输出 JSON。核心形状如下：
+
+```json
+{
+  "rule": {
+    "messageTypes": ["interactive"],
+    "cardMatchers": [
+      { "path": "$text", "operator": "regex", "value": "报警|告警|alarm" }
+    ],
+    "promptTemplate": "命中消息后注入给 agent 的完整执行 prompt",
+    "replyInThread": true,
+    "cooldownMs": 300000,
+    "settleMs": 60000
+  },
+  "poller": {
+    "intervalMs": 10000,
+    "pageSize": 20
+  },
+  "summary": {
+    "trigger": "当前群告警卡片",
+    "analysis": "使用 lumen-aigc-infra-debug skill 做只读诊断",
+    "reply": "原消息/话题下"
+  }
+}
+```
+
+bridge 会丢弃 skill 输出里的其它 `chatIds`，强制使用当前群；也会拒绝过宽的“所有文本消息”监听。管理员回复“确认规则”后，规则才会写入当前 profile，同时启用 `larkBot.poller` 并把当前群加入 `poller.chatIds`。
 
 ## lark-cli 身份策略
 
