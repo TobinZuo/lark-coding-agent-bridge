@@ -17,7 +17,7 @@ import {
 } from '../config/profile-store';
 import { canRunAdminCommand } from '../policy/access';
 import { log } from '../core/logger';
-import type { RulePlannerDraft, RulePlannerRequest } from './rule-planner';
+import { RulePlannerRejectedError, type RulePlannerDraft, type RulePlannerRequest } from './rule-planner';
 
 const DEFAULT_DEDUPE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_EVENT_MAX_AGE_MS = 5 * 60 * 1000;
@@ -107,8 +107,9 @@ export class AutoAnswerRuntime {
       return true;
     }
 
-    if (!isAutoRuleRequestText(msg.content)) return false;
+    const explicitCommand = isAutoRuleRequestText(msg.content);
     if (!input.planRule) {
+      if (!explicitCommand) return false;
       await replyToMessage(
         channel,
         msg,
@@ -130,6 +131,12 @@ export class AutoAnswerRuntime {
         profile: controls.profile,
       });
     } catch (err) {
+      if (err instanceof RulePlannerRejectedError) {
+        if (err.kind === 'not_listener_task') return false;
+        await replyToMessage(channel, msg, `不能创建自动监听规则：${err.message}`);
+        return true;
+      }
+      if (!explicitCommand) return false;
       await replyToMessage(
         channel,
         msg,
@@ -406,16 +413,7 @@ export function isAutoRuleRequestText(text: string): boolean {
   const normalized = text.trim();
   if (/^\/(?:auto-)?(?:alarm|alert)-card(?:-rule)?\b/i.test(normalized)) return true;
   if (/^\/(?:auto-)?(?:rule|listen|watch)\b/i.test(normalized)) return true;
-
-  const hasChineseSetupVerb = /创建|新建|新增|添加|配置|设置|设定|启用|生成|监听|监控/.test(normalized);
-  const hasChineseTarget = /消息|卡片|文本|富文本|报警|告警|关键词|包含/.test(normalized);
-  const hasChineseAction = /规则|自动分析|自动回复|自动处理|监听|调用|使用|skill|分析|回复/.test(normalized);
-  if (hasChineseSetupVerb && hasChineseTarget && hasChineseAction) return true;
-
-  const hasEnglishSetupVerb = /\b(?:create|add|configure|setup|set up|enable|generate|monitor|watch)\b/i.test(normalized);
-  const hasEnglishTarget = /\b(?:message|card|text|post|alarm|alert|keyword|contains)\b/i.test(normalized);
-  const hasEnglishAction = /\b(?:rule|auto(?:matic)?(?:ly)?|analysis|analyze|reply|monitor|watch|use|call|skill)\b/i.test(normalized);
-  return hasEnglishSetupVerb && hasEnglishTarget && hasEnglishAction;
+  return false;
 }
 
 function isConfirmAlarmRuleText(text: string): boolean {

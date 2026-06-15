@@ -11,7 +11,8 @@ import {
   normalizeIncomingMessage,
 } from '../../../src/bot/auto-answer';
 import type { AppConfig, LarkBotTriggerRule } from '../../../src/config/schema';
-import type { RulePlannerDraft } from '../../../src/bot/rule-planner';
+import type { Controls } from '../../../src/commands';
+import { RulePlannerRejectedError, type RulePlannerDraft } from '../../../src/bot/rule-planner';
 
 const app = {
   id: 'cli_test',
@@ -168,19 +169,81 @@ describe('auto-answer bot rules', () => {
   });
 
   it('only treats explicit alarm-card setup commands as rule requests', () => {
-    expect(isAlarmRuleRequestText('请配置这个群的告警卡片自动分析规则')).toBe(true);
+    expect(isAlarmRuleRequestText('请配置这个群的告警卡片自动分析规则')).toBe(false);
     expect(isAlarmRuleRequestText('/alarm-card-rule 告警卡片 自动分析')).toBe(true);
-    expect(isAlarmRuleRequestText('configure alarm card auto analysis rule')).toBe(true);
+    expect(isAlarmRuleRequestText('configure alarm card auto analysis rule')).toBe(false);
     expect(
       isAlarmRuleRequestText(
         '你监听这个群的消息，对告警卡片出现后，调用lumen-aigc-infra-debug skill分析报警原因发到报警卡片话题下',
       ),
-    ).toBe(true);
+    ).toBe(false);
 
     expect(isAlarmRuleRequestText('出现告警卡片你就在下方根据告警卡片分析问题原因')).toBe(false);
     expect(isAlarmRuleRequestText('新的报警卡片出来，你好像没看到')).toBe(false);
     expect(isAlarmRuleRequestText('我看出现了新卡片你也没有自动分析和回复啊')).toBe(false);
     expect(isAlarmRuleRequestText('你怎么立刻就生成自动分析规则草案了。不对吧')).toBe(false);
+  });
+
+  it('uses the planner to semantically decide natural-language listener requests', async () => {
+    const cfg: AppConfig = {
+      accounts: { app },
+      larkBot: { admins: ['ou_admin'] },
+    };
+    const channel = { send: vi.fn(async () => {}) };
+    const runtime = new AutoAnswerRuntime(() => 1000);
+    const draft: RulePlannerDraft = {
+      rule: {
+        id: 'semantic-rule',
+        chatIds: ['oc_alarm'],
+        messageTypes: ['interactive'],
+        cardMatchers: [{ path: '$text', operator: 'contains', value: '告警' }],
+        promptTemplate: 'Analyze alert card.',
+      },
+      summary: {
+        trigger: '当前群告警卡片',
+        analysis: '分析告警',
+        reply: '卡片话题下',
+      },
+    };
+    const planRule = vi.fn(async () => draft);
+
+    const handled = await runtime.tryHandleAdminConfig({
+      channel: channel as never,
+      controls: controlsFor(cfg),
+      msg: adminMessage('你监听这个群的消息，对告警卡片出现后，分析原因发到卡片话题下'),
+      planRule,
+    });
+
+    expect(handled).toBe(true);
+    expect(planRule).toHaveBeenCalled();
+    expect(channel.send).toHaveBeenCalledWith(
+      'oc_alarm',
+      { markdown: expect.stringContaining('当前群告警卡片') },
+      { replyTo: 'om_admin' },
+    );
+  });
+
+  it('lets ordinary config discussion continue when the planner says it is not a listener task', async () => {
+    const cfg: AppConfig = {
+      accounts: { app },
+      larkBot: { admins: ['ou_admin'] },
+    };
+    const channel = { send: vi.fn(async () => {}) };
+    const runtime = new AutoAnswerRuntime(() => 1000);
+    const planRule = vi.fn(async () => {
+      throw new RulePlannerRejectedError('not_listener_task', 'not_listener_task');
+    });
+
+    const handled = await runtime.tryHandleAdminConfig({
+      channel: channel as never,
+      controls: controlsFor(cfg),
+      msg: adminMessage('全局 larkBot.dedupeTtlMs 和当前告警规则 cooldownMs 是怎么配合的'),
+      planRule,
+    });
+
+    expect(handled).toBe(false);
+    expect(planRule).toHaveBeenCalled();
+    expect(channel.send).not.toHaveBeenCalled();
   });
 
   it('persists a draft returned by the external rule planner', async () => {
@@ -271,7 +334,7 @@ describe('auto-answer bot rules', () => {
     }
   });
 
-  it('reports when the listener planner is unavailable', async () => {
+  it('does not intercept natural-language listener text when the planner is unavailable', async () => {
     const cfg: AppConfig = {
       accounts: { app },
       larkBot: { admins: ['ou_admin'] },
@@ -293,6 +356,25 @@ describe('auto-answer bot rules', () => {
       msg: adminMessage('监听这个群的告警卡片并自动分析'),
     });
 
+    expect(handled).toBe(false);
+    expect(channel.send).not.toHaveBeenCalled();
+    expect(cfg.larkBot?.rules).toBeUndefined();
+  });
+
+  it('reports unavailable planner for explicit listener commands', async () => {
+    const cfg: AppConfig = {
+      accounts: { app },
+      larkBot: { admins: ['ou_admin'] },
+    };
+    const channel = { send: vi.fn(async () => {}) };
+    const runtime = new AutoAnswerRuntime(() => 1000);
+
+    const handled = await runtime.tryHandleAdminConfig({
+      channel: channel as never,
+      controls: controlsFor(cfg),
+      msg: adminMessage('/listen 告警卡片并自动分析'),
+    });
+
     expect(handled).toBe(true);
     expect(channel.send).toHaveBeenCalledWith(
       'oc_alarm',
@@ -302,6 +384,18 @@ describe('auto-answer bot rules', () => {
     expect(cfg.larkBot?.rules).toBeUndefined();
   });
 });
+
+function controlsFor(cfg: AppConfig): Controls {
+  return {
+    profile: 'codex',
+    cfg,
+    profileConfig: {
+      ...cfg,
+      access: { admins: ['ou_admin'], allowedUsers: [], allowedChats: [] },
+    },
+    ownerRefreshState: 'unknown',
+  } as unknown as Controls;
+}
 
 function messagePayload(input: { content: unknown }): unknown {
   return {

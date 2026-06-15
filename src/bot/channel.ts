@@ -76,6 +76,7 @@ import {
   buildRulePlannerPrompt,
   effectiveRulePlannerConfig,
   parseRulePlannerText,
+  RulePlannerRejectedError,
   type RulePlannerDraft,
   type RulePlannerRequest,
 } from './rule-planner';
@@ -647,7 +648,10 @@ async function runRulePlanner(input: IntakeDeps & {
     maxOutputChars: planner.maxOutputChars ?? 40_000,
   });
   const parsed = parseRulePlannerText(output, request);
-  if (!parsed.ok) throw new Error(parsed.error);
+  if (!parsed.ok) {
+    if (parsed.rejected) throw new RulePlannerRejectedError(parsed.error, parsed.rejectionKind);
+    throw new Error(parsed.error);
+  }
   log.info('auto-rule-planner', 'drafted', {
     chatId: request.chatId,
     msgId: request.messageId,

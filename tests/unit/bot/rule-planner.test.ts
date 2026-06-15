@@ -141,13 +141,15 @@ describe('auto-answer rule planner', () => {
 
   it('accepts explicit rejection from the planner skill', () => {
     const result = parseRulePlannerText(
-      JSON.stringify({ rejected: true, reason: '需要补充触发条件' }),
+      JSON.stringify({ rejected: true, kind: 'needs_clarification', reason: '需要补充触发条件' }),
       request,
     );
 
     expect(result).toMatchObject({
       ok: false,
       error: '需要补充触发条件',
+      rejected: true,
+      rejectionKind: 'needs_clarification',
     });
   });
 });

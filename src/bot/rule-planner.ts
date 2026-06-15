@@ -46,7 +46,14 @@ export interface RulePlannerDraft {
 
 export type RulePlannerValidationResult =
   | { ok: true; draft: RulePlannerDraft }
-  | { ok: false; error: string };
+  | { ok: false; error: string; rejected?: boolean; rejectionKind?: string };
+
+export class RulePlannerRejectedError extends Error {
+  constructor(message: string, readonly kind?: string) {
+    super(message);
+    this.name = 'RulePlannerRejectedError';
+  }
+}
 
 export function effectiveRulePlannerConfig(
   input: LarkBotRulePlannerConfig | undefined,
@@ -110,7 +117,8 @@ export function buildRulePlannerPrompt(
     '- rule.promptTemplate 必须由你生成，里面应该写清楚命中消息后要做什么、用哪个业务 skill、输出格式和禁止的副作用。',
     '- 不要生成“所有文本消息都处理”的宽泛规则；文本/富文本监听必须有 textMatchers。',
     '- interactive 卡片可以监听所有卡片，也可以用 cardMatchers/templateIds 收窄。',
-    '- 如果管理员意图不够明确，输出 {"rejected": true, "reason": "需要补充..."}。',
+    '- 如果管理员不是在要求创建/修改/启用群消息监听任务，而是在提问、讨论配置、排查现有行为，输出 {"rejected": true, "kind": "not_listener_task", "reason": "not_listener_task"}。',
+    '- 如果管理员确实想创建监听任务但意图不够明确，输出 {"rejected": true, "kind": "needs_clarification", "reason": "需要补充..."}。',
     '',
     `当前 profile: ${request.profile}`,
     `当前 chatId: ${request.chatId}`,
@@ -130,7 +138,13 @@ export function normalizeRulePlannerOutput(
   if (!isRecord(raw)) return { ok: false, error: 'planner output is not a JSON object' };
   if (raw.rejected === true) {
     const reason = stringValue(raw.reason) || '外部配置 skill 拒绝生成规则';
-    return { ok: false, error: reason };
+    const rejectionKind = stringValue(raw.kind);
+    return {
+      ok: false,
+      error: reason,
+      rejected: true,
+      ...(rejectionKind ? { rejectionKind } : {}),
+    };
   }
   const rawRule = raw.rule;
   if (!isRecord(rawRule)) return { ok: false, error: 'planner output missing rule object' };
