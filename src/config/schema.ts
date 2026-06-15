@@ -100,6 +100,11 @@ export interface LarkBotListenerConfig {
 
 export interface LarkBotPollerConfig {
   enabled?: boolean;
+  /** Millisecond timestamp when polling became active for these chats.
+   * Poller uses this as a lower bound so newly enabled chats do not replay
+   * earlier history, while still catching messages that arrive after enable
+   * but before the first polling tick. */
+  enabledAtMs?: number;
   intervalMs?: number;
   overlapMs?: number;
   maxLookbackMs?: number;

@@ -78,16 +78,48 @@ describe('auto-answer rule planner', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.error);
     expect(result.draft.rule).toMatchObject({
-      id: 'payment-card',
       chatIds: ['oc_current'],
       messageTypes: ['interactive'],
       replyInThread: true,
     });
+    expect(result.draft.rule.id).toMatch(/^payment-card-[0-9a-f]{12}$/);
     expect(result.draft.poller).toMatchObject({
       intervalMs: 5000,
       pageSize: 50,
     });
     expect(result.draft.summary.analysis).toBe('foo-debug skill');
+  });
+
+  it('scopes planner-provided rule ids by chat and instruction', () => {
+    const first = parseRulePlannerText(
+      JSON.stringify({
+        rule: {
+          id: 'alarm-card',
+          messageTypes: ['interactive'],
+          cardMatchers: [{ path: '$text', operator: 'contains', value: '报警' }],
+          promptTemplate: 'Analyze alert cards.',
+        },
+      }),
+      { ...request, chatId: 'oc_first' },
+    );
+    const second = parseRulePlannerText(
+      JSON.stringify({
+        rule: {
+          id: 'alarm-card',
+          messageTypes: ['interactive'],
+          cardMatchers: [{ path: '$text', operator: 'contains', value: '报警' }],
+          promptTemplate: 'Analyze alert cards.',
+        },
+      }),
+      { ...request, chatId: 'oc_second' },
+    );
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (!first.ok || !second.ok) throw new Error('expected valid drafts');
+    expect(first.draft.rule.id).toMatch(/^alarm-card-[0-9a-f]{12}$/);
+    expect(second.draft.rule.id).toMatch(/^alarm-card-[0-9a-f]{12}$/);
+    expect(first.draft.rule.id).not.toBe(second.draft.rule.id);
   });
 
   it('rejects broad text listeners without matchers', () => {

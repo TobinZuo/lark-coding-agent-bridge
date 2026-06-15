@@ -262,6 +262,7 @@ function normalizeLarkBotRulePlanner(
 
 function normalizeLarkBotPoller(input: LarkBotConfig['poller'] | undefined): LarkBotConfig['poller'] | undefined {
   if (!input || typeof input !== 'object') return undefined;
+  const enabledAtMs = positiveInteger(input.enabledAtMs);
   const intervalMs = positiveInteger(input.intervalMs);
   const overlapMs = positiveInteger(input.overlapMs);
   const maxLookbackMs = positiveInteger(input.maxLookbackMs);
@@ -272,6 +273,7 @@ function normalizeLarkBotPoller(input: LarkBotConfig['poller'] | undefined): Lar
   const chatIds = stringArray(input.chatIds);
   const out: NonNullable<LarkBotConfig['poller']> = {
     ...(typeof input.enabled === 'boolean' ? { enabled: input.enabled } : {}),
+    ...(enabledAtMs ? { enabledAtMs } : {}),
     ...(intervalMs ? { intervalMs } : {}),
     ...(overlapMs ? { overlapMs } : {}),
     ...(maxLookbackMs ? { maxLookbackMs } : {}),

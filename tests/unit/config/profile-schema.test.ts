@@ -554,6 +554,7 @@ describe('profile schema', () => {
         },
         poller: {
           enabled: true,
+          enabledAtMs: 1700000000000,
           intervalMs: 10000,
           overlapMs: 180000,
           maxLookbackMs: 900000,
@@ -596,6 +597,7 @@ describe('profile schema', () => {
       },
       poller: {
         enabled: true,
+        enabledAtMs: 1700000000000,
         intervalMs: 10000,
         overlapMs: 180000,
         maxLookbackMs: 900000,

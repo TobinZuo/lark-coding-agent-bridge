@@ -94,6 +94,37 @@ describe('lark message poller', () => {
     expect(onMessage).not.toHaveBeenCalled();
   });
 
+  it('processes messages created after a newly enabled poller boundary', async () => {
+    const onMessage = vi.fn();
+    const h = harness({
+      startedAtMs: 1_700_000_000_000,
+      items: [
+        alarmItem({ message_id: 'om_before', create_time: '1700000030000' }),
+        alarmItem({ message_id: 'om_after', create_time: '1700000050000' }),
+      ],
+      onMessage,
+      primeChat: false,
+      cfg: {
+        accounts: { app },
+        larkBot: {
+          poller: {
+            enabled: true,
+            enabledAtMs: 1_700_000_040_000,
+            chatIds: ['oc_alarm'],
+            intervalMs: 10_000,
+            overlapMs: 120_000,
+            maxLookbackMs: 600_000,
+            pageSize: 10,
+          },
+        },
+      },
+    });
+
+    expect(await pollLarkMessagesOnce(h)).toBe(1);
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect((onMessage.mock.calls[0]?.[0] as NormalizedMessage).messageId).toBe('om_after');
+  });
+
   it('honors leaderId for two-machine deployments', async () => {
     const prev = process.env.LARK_CHANNEL_INSTANCE_ID;
     process.env.LARK_CHANNEL_INSTANCE_ID = 'machine-b';

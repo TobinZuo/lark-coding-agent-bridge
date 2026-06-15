@@ -104,6 +104,37 @@ describe('auto-answer bot rules', () => {
     expect(second).toBeUndefined();
   });
 
+  it('does not drop settled auto messages only because the original create time is stale', () => {
+    const runtime = new AutoAnswerRuntime(() => 10 * 60 * 1000);
+    const cfg: AppConfig = {
+      accounts: { app: { id: 'cli_test', secret: 'secret', tenant: 'feishu' } },
+      larkBot: {
+        rules: [
+          {
+            id: 'alarm-card',
+            chatIds: ['oc_alarm'],
+            messageTypes: ['interactive'],
+            cardMatchers: [{ path: '$text', operator: 'contains', value: '报警' }],
+            promptTemplate: '请分析报警',
+          },
+        ],
+      },
+    };
+    const msg = normalizedMessage({
+      content: JSON.stringify({ body: { elements: [{ content: '数据库报警' }] } }),
+      rawContentType: 'interactive',
+    }) as NormalizedMessage & { createTime?: number };
+    msg.createTime = 1;
+    msg.raw = {
+      ...(msg.raw as Record<string, unknown>),
+      __larkAutoSettle: { settled: true },
+    };
+
+    const match = runtime.matchMessage(cfg, msg);
+
+    expect(match?.rule.id).toBe('alarm-card');
+  });
+
   it('only treats explicit alarm-card setup commands as rule requests', () => {
     expect(isAlarmRuleRequestText('请配置这个群的告警卡片自动分析规则')).toBe(true);
     expect(isAlarmRuleRequestText('/alarm-card-rule 告警卡片 自动分析')).toBe(true);
@@ -152,6 +183,7 @@ describe('auto-answer bot rules', () => {
         poller: {
           intervalMs: 15_000,
           pageSize: 10,
+          chatIds: ['oc_other'],
         },
         summary: {
           trigger: '当前群支付失败卡片',
@@ -187,6 +219,7 @@ describe('auto-answer bot rules', () => {
       );
       expect(controls.cfg.larkBot?.poller).toMatchObject({
         enabled: true,
+        enabledAtMs: 1000,
         intervalMs: 15_000,
         pageSize: 10,
         chatIds: ['oc_alarm'],

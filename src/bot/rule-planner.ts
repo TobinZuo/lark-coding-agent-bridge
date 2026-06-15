@@ -310,7 +310,11 @@ function normalizePoller(input: Record<string, unknown>): LarkBotPollerConfig {
 
 function safeRuleId(rawId: string, request: RulePlannerRequest): string {
   const trimmed = rawId.trim();
-  if (/^[A-Za-z0-9_.:-]{1,80}$/.test(trimmed)) return trimmed;
+  const scopedHash = shortHash(`${request.chatId}:${request.instruction}`, 12);
+  if (/^[A-Za-z0-9_.:-]{1,80}$/.test(trimmed)) {
+    const base = trimmed.slice(0, Math.max(1, 80 - scopedHash.length - 1));
+    return `${base}-${scopedHash}`;
+  }
   return `${AUTO_RULE_ID_PREFIX}-${shortHash(`${request.chatId}:${request.instruction}`, 12)}`;
 }
 

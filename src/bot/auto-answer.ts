@@ -86,6 +86,7 @@ export class AutoAnswerRuntime {
       await saveLarkBotRule(controls, draft.rule, {
         ...(draft.pollerChatId ? { pollerChatId: draft.pollerChatId } : {}),
         ...(draft.poller ? { poller: draft.poller } : {}),
+        pollerEnabledAtMs: this.now(),
       });
       this.drafts.delete(key);
       await replyToMessage(
@@ -161,7 +162,10 @@ export class AutoAnswerRuntime {
   ): RuleMatch | undefined {
     const incoming = incomingFromNormalizedMessage(msg, botOpenId);
     if (!incoming) return undefined;
-    if (isStale(incoming, cfg.larkBot?.listener?.eventMaxAgeMs ?? DEFAULT_EVENT_MAX_AGE_MS, this.now())) {
+    if (
+      !isAutoSettledNormalizedMessage(msg) &&
+      isStale(incoming, cfg.larkBot?.listener?.eventMaxAgeMs ?? DEFAULT_EVENT_MAX_AGE_MS, this.now())
+    ) {
       log.info('auto-answer', 'stale-message', { messageId: incoming.messageId });
       return undefined;
     }
@@ -410,7 +414,7 @@ function isConfirmAlarmRuleText(text: string): boolean {
 async function saveLarkBotRule(
   controls: Controls,
   rule: LarkBotTriggerRule,
-  options: { pollerChatId?: string; poller?: RulePlannerDraft['poller'] } = {},
+  options: { pollerChatId?: string; poller?: RulePlannerDraft['poller']; pollerEnabledAtMs?: number } = {},
 ): Promise<void> {
   await withConfigFileLock(controls.configPath, async () => {
     const root = await loadRootConfig(controls.configPath);
@@ -436,7 +440,7 @@ async function saveLarkBotRule(
 function upsertRule(
   current: LarkBotConfig | undefined,
   rule: LarkBotTriggerRule,
-  options: { pollerChatId?: string; poller?: RulePlannerDraft['poller'] } = {},
+  options: { pollerChatId?: string; poller?: RulePlannerDraft['poller']; pollerEnabledAtMs?: number } = {},
 ): LarkBotConfig {
   const rules = [...(current?.rules ?? [])].filter((item) => item.id !== rule.id);
   rules.push(rule);
@@ -445,9 +449,9 @@ function upsertRule(
         ...(current?.poller ?? {}),
         ...(options.poller ?? {}),
         enabled: true,
+        enabledAtMs: options.pollerEnabledAtMs ?? current?.poller?.enabledAtMs,
         chatIds: [...new Set([
           ...(current?.poller?.chatIds ?? []),
-          ...(options.poller?.chatIds ?? []),
           options.pollerChatId,
         ])],
       }
@@ -624,6 +628,11 @@ function fingerprintFor(rule: LarkBotTriggerRule, msg: IncomingMessage): string 
 function isStale(msg: IncomingMessage, maxAgeMs: number, now: number): boolean {
   if (!msg.createTime) return false;
   return now - msg.createTime > maxAgeMs;
+}
+
+function isAutoSettledNormalizedMessage(msg: NormalizedMessage): boolean {
+  const raw = msg.raw as { __larkAutoSettle?: { settled?: unknown } } | undefined;
+  return raw?.__larkAutoSettle?.settled === true;
 }
 
 function shortHash(value: string, length = 8): string {

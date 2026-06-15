@@ -79,6 +79,7 @@ class RecentMessageSet {
 
 interface PollTarget {
   chatId: string;
+  enabledAtMs?: number;
   overlapMs: number;
   maxLookbackMs: number;
   pageSize: number;
@@ -161,16 +162,21 @@ export async function pollLarkMessagesOnce(opts: PollLarkMessagesOptions): Promi
   for (const target of targets) {
     let chatState = opts.state.getChat(target.chatId);
     if (!chatState) {
-      chatState = opts.state.initChat(target.chatId, current);
+      const initialLastSeen = target.enabledAtMs === undefined
+        ? current
+        : Math.min(current, Math.max(opts.state.startedAtMs, target.enabledAtMs));
+      chatState = opts.state.initChat(target.chatId, initialLastSeen);
       log.info('message-poller', 'chat-warmup', {
         chatId: target.chatId,
         lastSeenCreateTime: chatState.lastSeenCreateTime,
+        enabledAtMs: target.enabledAtMs,
       });
-      continue;
+      if (target.enabledAtMs === undefined || initialLastSeen >= current) continue;
     }
     if (chatState.backoffUntil && chatState.backoffUntil > current) continue;
     const windowStartMs = Math.max(
       opts.state.startedAtMs,
+      target.enabledAtMs ?? 0,
       chatState.lastSeenCreateTime - target.overlapMs,
       current - target.maxLookbackMs,
     );
@@ -198,6 +204,7 @@ export async function pollLarkMessagesOnce(opts: PollLarkMessagesOptions): Promi
       if (!messageId || item.deleted === true) continue;
       if (createTime) maxSeenCreateTime = Math.max(maxSeenCreateTime, createTime);
       if (!createTime || createTime <= opts.state.startedAtMs) continue;
+      if (target.enabledAtMs !== undefined && createTime <= target.enabledAtMs) continue;
       if (!opts.state.markSeen(messageId)) continue;
 
       const msg = await normalizePolledMessage(opts.channel, item, target.chatId, opts.botOpenId);
@@ -224,6 +231,7 @@ function pollTargets(cfg: AppConfig): PollTarget[] {
   if (chatIds.length === 0) return [];
   return chatIds.map((chatId) => ({
     chatId,
+    ...(positiveMs(poller.enabledAtMs, 0) ? { enabledAtMs: positiveMs(poller.enabledAtMs, 0) } : {}),
     overlapMs: positiveMs(poller.overlapMs, DEFAULT_OVERLAP_MS),
     maxLookbackMs: positiveMs(poller.maxLookbackMs, DEFAULT_MAX_LOOKBACK_MS),
     pageSize: pageSize(poller.pageSize),
