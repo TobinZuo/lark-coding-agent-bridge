@@ -6,7 +6,7 @@ import { createDefaultProfileConfig } from '../../../src/config/profile-schema.j
 import { log } from '../../../src/core/logger.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
-import { FakeAgentAdapter } from '../../helpers/fake-agent.js';
+import { FakeAgentAdapter, type FakeAgentEvents } from '../../helpers/fake-agent.js';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
 
 const sdkMock = vi.hoisted(() => ({
@@ -156,11 +156,84 @@ describe('markdown stream startup failures', () => {
       ),
     );
   }, 10_000);
+
+  it('sends a final fallback reply when the stream does not settle after terminal flush', async () => {
+    const streamNeverSettles = deferred<void>();
+    let streamProducerStarted = false;
+    const h = await createHarness({
+      events: [[
+        { type: 'text', delta: 'final answer' },
+        { type: 'done', terminationReason: 'normal' },
+      ]],
+      stream: async (_chatId, input) => {
+        const producer = (input as {
+          markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+        }).markdown;
+        if (producer) {
+          streamProducerStarted = true;
+          await producer({ setContent: vi.fn(async () => {}) });
+        }
+        await streamNeverSettles.promise;
+      },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_first', 'first'));
+    await waitFor(() => streamProducerStarted);
+    await waitFor(
+      () =>
+        h.channel.sent.some((msg) =>
+          ((msg.content as { markdown?: string } | undefined)?.markdown ?? '').includes(
+            'final answer',
+          ),
+        ),
+      4500,
+    );
+
+    expect(lastMarkdown(h.channel)).not.toContain('正在');
+  }, 10_000);
+
+  it('sends a final fallback reply when the final stream update fails', async () => {
+    const h = await createHarness({
+      events: [[
+        { type: 'text', delta: 'final answer' },
+        { type: 'done', terminationReason: 'normal' },
+      ]],
+      stream: async (_chatId, input) => {
+        const producer = (input as {
+          markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+        }).markdown;
+        if (!producer) return;
+        await producer({
+          setContent: vi.fn(async (markdown: string) => {
+            if (markdown.includes('final answer') && !markdown.includes('正在')) {
+              throw new Error('update failed');
+            }
+          }),
+        });
+      },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_first', 'first'));
+    await waitFor(
+      () =>
+        h.channel.sent.some((msg) =>
+          ((msg.content as { markdown?: string } | undefined)?.markdown ?? '').includes(
+            'final answer',
+          ),
+        ),
+      3000,
+    );
+
+    expect(lastMarkdown(h.channel)).not.toContain('正在');
+  }, 10_000);
 });
 
 async function createHarness(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
   stream?: StreamFn;
+  events?: FakeAgentEvents;
 } = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel;
@@ -200,7 +273,7 @@ async function createHarness(options: {
   const agent = new FakeAgentAdapter({
     id: 'codex',
     displayName: 'Codex',
-    events: [
+    events: options.events ?? [
       [
         {
           type: 'error',

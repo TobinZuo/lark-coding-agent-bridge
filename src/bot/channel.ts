@@ -83,6 +83,8 @@ import type { RunExecution } from '../runtime/run-executor';
 
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
+const FINAL_STREAM_UPDATE_ATTEMPTS = 3;
+const FINAL_STREAM_UPDATE_RETRY_MS = 250;
 const REACTION_CLEANUP_GRACE_MS = 1000;
 
 const BRIDGE_AGENT_INSTRUCTIONS = [
@@ -1154,6 +1156,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   try {
     if (replyMode === 'card') {
       let latestState: RunState = initialState;
+      let finalStreamUpdateFailed = false;
       let producerStarted = false;
       let cardCtrl:
         | { update(next: object | ((current: object) => object)): Promise<void> }
@@ -1167,7 +1170,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         async (state) => {
           latestState = state;
           if (cardCtrl) {
-            await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
+            const ctrl = cardCtrl;
+            const card = renderCard(filterForPrefs(state), cardRenderOptions);
+            const ok = await updateStreamContent(replyMode, state, { contentType: 'card' }, () =>
+              ctrl.update(card),
+            );
+            if (state.terminal !== 'running') finalStreamUpdateFailed = !ok;
           }
         },
       );
@@ -1179,7 +1187,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             producer: async (ctrl) => {
               producerStarted = true;
               cardCtrl = ctrl;
-              await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
+              const card = renderCard(filterForPrefs(latestState), cardRenderOptions);
+              const ok = await updateStreamContent(
+                replyMode,
+                latestState,
+                { contentType: 'card' },
+                () => ctrl.update(card),
+              );
+              if (latestState.terminal !== 'running') finalStreamUpdateFailed = !ok;
               await renderDone;
             },
           },
@@ -1191,6 +1206,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         streamDone,
         renderDone,
         producerStarted: () => producerStarted,
+        needsFallback: () => finalStreamUpdateFailed,
         fallback: async (state) => {
           await channel.send(
             chatId,
@@ -1201,6 +1217,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       });
     } else if (replyMode === 'markdown') {
       let latestState: RunState = initialState;
+      let finalStreamUpdateFailed = false;
       let producerStarted = false;
       let markdownCtrl: { setContent(markdown: string): Promise<void> } | undefined;
       const renderDone = processAgentStream(
@@ -1212,7 +1229,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         async (state) => {
           latestState = state;
           if (markdownCtrl) {
-            await markdownCtrl.setContent(renderText(filterForPrefs(state)));
+            const ctrl = markdownCtrl;
+            const body = renderText(filterForPrefs(state));
+            const ok = await updateStreamContent(
+              replyMode,
+              state,
+              { contentType: 'markdown', chars: body.length },
+              () => ctrl.setContent(body),
+            );
+            if (state.terminal !== 'running') finalStreamUpdateFailed = !ok;
           }
         },
       );
@@ -1222,7 +1247,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           markdown: async (ctrl) => {
             producerStarted = true;
             markdownCtrl = ctrl;
-            await ctrl.setContent(renderText(filterForPrefs(latestState)));
+            const body = renderText(filterForPrefs(latestState));
+            const ok = await updateStreamContent(
+              replyMode,
+              latestState,
+              { contentType: 'markdown', chars: body.length },
+              () => ctrl.setContent(body),
+            );
+            if (latestState.terminal !== 'running') finalStreamUpdateFailed = !ok;
             await renderDone;
           },
         },
@@ -1233,6 +1265,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         streamDone,
         renderDone,
         producerStarted: () => producerStarted,
+        needsFallback: () => finalStreamUpdateFailed,
         fallback: async (state) => {
           const body = renderText(filterForPrefs(state));
           if (body.trim()) {
@@ -1390,11 +1423,56 @@ async function processAgentStream(
   return state;
 }
 
+async function updateStreamContent(
+  mode: 'card' | 'markdown',
+  state: RunState,
+  fields: Record<string, unknown>,
+  update: () => Promise<void>,
+): Promise<boolean> {
+  const terminal = state.terminal !== 'running';
+  const attempts = terminal ? FINAL_STREAM_UPDATE_ATTEMPTS : 1;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await update();
+      if (terminal) {
+        log.info('stream', 'final-update', {
+          mode,
+          terminal: state.terminal,
+          attempt,
+          ...fields,
+        });
+      }
+      return true;
+    } catch (err) {
+      if (!terminal || attempt === attempts) {
+        log.fail('stream', err, {
+          mode,
+          step: terminal ? 'final-update' : 'update',
+          terminal: state.terminal,
+          attempt,
+          ...fields,
+        });
+        if (terminal) return false;
+        throw err;
+      }
+      log.warn('stream', 'final-update-retry', {
+        mode,
+        terminal: state.terminal,
+        attempt,
+        ...fields,
+      });
+      await delay(FINAL_STREAM_UPDATE_RETRY_MS * attempt);
+    }
+  }
+  return false;
+}
+
 async function awaitRenderAwareStream(input: {
   mode: 'card' | 'markdown';
   streamDone: Promise<unknown>;
   renderDone: Promise<RunState>;
   producerStarted: () => boolean;
+  needsFallback?: () => boolean;
   fallback: (state: RunState) => Promise<void>;
 }): Promise<void> {
   const streamResult = input.streamDone.then(
@@ -1420,6 +1498,10 @@ async function awaitRenderAwareStream(input: {
   if (first.kind === 'stream') {
     const rendered = await renderResult;
     if (!rendered.ok) throw rendered.err;
+    if (input.needsFallback?.()) {
+      log.warn('stream', 'final-update-fallback', { mode: input.mode });
+      await runFallbackReply(input.mode, rendered.state, input.fallback);
+    }
     return;
   }
 
@@ -1443,9 +1525,14 @@ async function awaitRenderAwareStream(input: {
         log.fail('stream', result.err, { mode: input.mode, step: 'stream-terminal-late' });
       }
     });
+    await runFallbackReply(input.mode, first.state, input.fallback);
     return;
   }
   if (!terminal.ok) throw terminal.err;
+  if (input.needsFallback?.()) {
+    log.warn('stream', 'final-update-fallback', { mode: input.mode });
+    await runFallbackReply(input.mode, first.state, input.fallback);
+  }
 }
 
 async function runFallbackReply(
