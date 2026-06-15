@@ -160,6 +160,49 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 
 DMs do not require an @ mention. Groups and topic groups require `@bot` by default; `@all` is ignored. Cloud-doc comments in supported document types run when the bot is mentioned.
 
+## Group auto-answer rules
+
+The bridge can also run a persistent Webhook listener for Feishu / Lark events and dispatch matching group messages to the local agent automatically. It does not listen to every casual message by default. Only messages matching `larkBot.rules`, or rules explicitly drafted and confirmed by an admin in chat, trigger the agent.
+
+In the Feishu / Lark developer console, subscribe the app to `im.message.receive_v1` and set the request URL to your public Webhook endpoint, for example `https://example.com/lark/events`. The local listener defaults to `0.0.0.0:8787/lark/events`; production deployments usually need a reverse proxy or tunnel.
+
+This is a profile-field snippet. Do not replace the whole `config.json` with it; edit the matching profile's `larkBot` field.
+
+```json
+{
+  "larkBot": {
+    "listener": {
+      "enabled": true,
+      "host": "0.0.0.0",
+      "port": 8787,
+      "webhookPath": "/lark/events",
+      "verificationToken": "${LARK_EVENT_VERIFY_TOKEN}",
+      "encryptKey": "${LARK_EVENT_ENCRYPT_KEY}"
+    },
+    "admins": ["ou_xxx"],
+    "dedupeTtlMs": 600000,
+    "defaultReplyMode": "markdown",
+    "rules": [
+      {
+        "id": "alarm-card",
+        "enabled": true,
+        "chatIds": ["oc_xxx"],
+        "messageTypes": ["interactive"],
+        "cardMatchers": [
+          { "path": "$text", "operator": "regex", "value": "报警|告警|alarm|critical|error" }
+        ],
+        "requireMention": false,
+        "replyInThread": true,
+        "cooldownMs": 300000,
+        "promptTemplate": "This is an alert card from the group. Summarize the alert, assess impact, list likely causes, and suggest next debugging steps."
+      }
+    ]
+  }
+}
+```
+
+Admins can also mention the bot in the target group and say, for example, "this group's alarm cards should be analyzed every time one appears". The bot replies with a draft rule first; the admin must reply "确认报警卡片规则" to persist and enable it for the current profile.
+
 ## lark-cli identity policy
 
 Each profile uses a profile-local lark-cli directory at `~/.lark-channel/profiles/<profile>/lark-cli`. The agent process receives `LARKSUITE_CLI_CONFIG_DIR` for that directory, so personal authorization in one profile is not shared with another profile.

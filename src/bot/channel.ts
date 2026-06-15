@@ -62,6 +62,8 @@ import { fetchQuotedContext, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
+import { AutoAnswerRuntime, autoAnswerMeta } from './auto-answer';
+import { startWebhookListener, type WebhookListener } from './webhook-listener';
 
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
@@ -179,6 +181,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // so /config bumps take effect for the next run.
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
+  const autoAnswer = new AutoAnswerRuntime();
 
   // Resolve the App Secret to plaintext. The config field can be a literal
   // string, a "${VAR}" template, or a {source, id} SecretRef referencing
@@ -296,6 +299,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           chatModeCache,
           executor,
           pool,
+          autoAnswer,
         }),
       ).catch((err) => log.fail('intake', err));
     },
@@ -380,6 +384,30 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   });
   await ownerRefresh.start();
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
+  const webhookListener = await startWebhookListener({
+    cfg,
+    appPaths: deps.appPaths,
+    botOpenId: channel.botIdentity?.openId,
+    onMessage: async (msg) => {
+      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
+        intakeMessage({
+          channel,
+          agent,
+          sessions,
+          sessionCatalog,
+          workspaces,
+          activeRuns,
+          pending,
+          msg,
+          controls,
+          chatModeCache,
+          executor,
+          pool,
+          autoAnswer,
+        }),
+      ).catch((err) => log.fail('webhook-intake', err));
+    },
+  });
 
   const identity = channel.botIdentity;
   // Late-bind the bot's own IM identity into the agent adapter so the system
@@ -420,6 +448,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       ownerRefresh.stop();
       knownChatsRefresh.stop();
       keepalive.stop();
+      await stopWebhookListener(webhookListener);
       pending.cancelAll();
       const [disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),
@@ -464,6 +493,15 @@ function startKnownChatsRefreshTimer(
   };
 }
 
+async function stopWebhookListener(listener: WebhookListener | undefined): Promise<void> {
+  if (!listener) return;
+  try {
+    await listener.stop();
+  } catch (err) {
+    log.fail('webhook', err, { step: 'stop' });
+  }
+}
+
 async function sendNonAllowedGroupHint(
   channel: LarkChannel,
   chatId: string,
@@ -492,6 +530,7 @@ interface IntakeDeps {
   chatModeCache: ChatModeCache;
   executor: RunExecutor;
   pool: ProcessPool;
+  autoAnswer: AutoAnswerRuntime;
 }
 
 async function intakeMessage(deps: IntakeDeps): Promise<void> {
@@ -503,12 +542,32 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     workspaces,
     activeRuns,
     pending,
-    msg,
     controls,
     chatModeCache,
     executor,
     pool,
+    autoAnswer,
   } = deps;
+  let { msg } = deps;
+  const configHandled = await autoAnswer.tryHandleAdminConfig({ channel, controls, msg });
+  if (configHandled) {
+    log.info('intake', 'auto-config-command', { chatId: msg.chatId, msgId: msg.messageId });
+    return;
+  }
+  const autoMatch = autoAnswer.matchMessage(controls.cfg, msg, channel.botIdentity?.openId, controls.profile);
+  if (autoMatch) {
+    if (!autoAnswer.tryRecordMessage(msg.messageId, controls.cfg.larkBot?.dedupeTtlMs)) {
+      log.info('intake', 'auto-duplicate-message', { chatId: msg.chatId, msgId: msg.messageId });
+      return;
+    }
+    msg = autoMatch.message;
+    log.info('intake', 'auto-rule-match', {
+      chatId: msg.chatId,
+      msgId: msg.messageId,
+      ruleId: autoMatch.rule.id,
+      fingerprint: autoMatch.fingerprint,
+    });
+  }
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
@@ -525,8 +584,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     resources: msg.resources.length,
   });
 
-  const accessDecision =
-    msg.chatType === 'p2p'
+  const accessDecision = autoAnswerMeta(msg)
+    ? ({ ok: true, reason: 'allowed-chat' } as const)
+    : msg.chatType === 'p2p'
       ? canUseDm(controls.profileConfig, controls, msg.senderId)
       : canUseGroup(controls.profileConfig, controls, msg.chatId, msg.senderId);
   if (!accessDecision.ok) {
@@ -551,6 +611,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // event reaching here is either targeted or undirected chatter.
   if (
     msg.chatType !== 'p2p' &&
+    !autoAnswerMeta(msg) &&
     getRequireMentionInGroup(controls.cfg) &&
     !msg.mentionedBot
   ) {
@@ -627,6 +688,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
+  const autoMeta = autoAnswerMeta(firstMsg);
 
   const resourceItems = batch.flatMap((m) =>
     m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
@@ -678,11 +740,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // topic discussion breaks visually.
   const sendOpts = {
     replyTo: lastMsg.messageId,
-    ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
+    ...((autoMeta?.replyInThread ?? (mode === 'topic' && Boolean(threadId))) ? { replyInThread: true } : {}),
   };
 
-  const accessDecision =
-    firstMsg.chatType === 'p2p'
+  const accessDecision = autoMeta
+    ? ({ ok: true, reason: 'allowed-chat' } as const)
+    : firstMsg.chatType === 'p2p'
       ? canUseDm(controls.profileConfig, controls, firstMsg.senderId)
       : canUseGroup(controls.profileConfig, controls, firstMsg.chatId, firstMsg.senderId);
   const scopeContext: ScopeContext = {
@@ -766,7 +829,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     log.info('flush', 'idle-watchdog', { idleTimeoutMs });
   }
 
-  const replyMode = getMessageReplyMode(controls.cfg);
+  const replyMode = autoMeta && controls.cfg.larkBot?.defaultReplyMode
+    ? controls.cfg.larkBot.defaultReplyMode
+    : getMessageReplyMode(controls.cfg);
   log.info('flush', 'reply-mode', { mode: replyMode });
 
   // Re-read prefs on every flush so toggling /config mid-stream takes

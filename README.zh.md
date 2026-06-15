@@ -160,6 +160,49 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 
 私聊不需要 @。群和话题群默认必须 `@bot`；`@all` 会被忽略。支持的云文档评论里 @bot 就会触发回复。
 
+## 群消息自动触发
+
+bridge 可以作为常驻 Webhook 服务接收飞书事件，并按显式规则自动把群消息交给本机 agent。默认不会监听所有闲聊；只有 `larkBot.rules` 命中的消息，或管理员在群里 `@bot` 后确认创建的规则，才会触发。
+
+需要在飞书开放平台给应用订阅 `im.message.receive_v1`，并把请求地址配置为你的公网 Webhook，例如 `https://example.com/lark/events`。本机服务默认监听 `0.0.0.0:8787/lark/events`，生产环境通常需要反向代理或内网穿透。
+
+下面只是 profile 里的字段片段，不要整段覆盖 `config.json`；请改对应 profile 下的 `larkBot` 字段。
+
+```json
+{
+  "larkBot": {
+    "listener": {
+      "enabled": true,
+      "host": "0.0.0.0",
+      "port": 8787,
+      "webhookPath": "/lark/events",
+      "verificationToken": "${LARK_EVENT_VERIFY_TOKEN}",
+      "encryptKey": "${LARK_EVENT_ENCRYPT_KEY}"
+    },
+    "admins": ["ou_xxx"],
+    "dedupeTtlMs": 600000,
+    "defaultReplyMode": "markdown",
+    "rules": [
+      {
+        "id": "alarm-card",
+        "enabled": true,
+        "chatIds": ["oc_xxx"],
+        "messageTypes": ["interactive"],
+        "cardMatchers": [
+          { "path": "$text", "operator": "regex", "value": "报警|告警|alarm|critical|error" }
+        ],
+        "requireMention": false,
+        "replyInThread": true,
+        "cooldownMs": 300000,
+        "promptTemplate": "这是一张群里的报警卡片。请概括告警、判断影响面、列出可能原因，并给出排查步骤。"
+      }
+    ]
+  }
+}
+```
+
+管理员也可以在目标群里 `@bot` 说“这个群里的报警卡片，每出现一个你就得分析一次”。bot 会先回复规则草案；管理员再回复“确认报警卡片规则”后，规则才会写入当前 profile。
+
 ## lark-cli 身份策略
 
 每个 profile 都使用当前 profile 的 lark-cli 目录：`~/.lark-channel/profiles/<profile>/lark-cli`。agent 子进程会收到指向这个目录的 `LARKSUITE_CLI_CONFIG_DIR`，所以一个 profile 里的个人授权不会共享给另一个 profile。

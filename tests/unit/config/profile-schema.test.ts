@@ -537,4 +537,57 @@ describe('profile schema', () => {
       maxAccess: 'workspace',
     });
   });
+
+  it('preserves lark bot listener and trigger rules', () => {
+    const cfg = normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'claude',
+      accounts: { app },
+      larkBot: {
+        listener: {
+          enabled: true,
+          host: '127.0.0.1',
+          port: 9090,
+          webhookPath: '/lark/events',
+          verificationToken: '${LARK_WEBHOOK_TOKEN}',
+          encryptKey: '${LARK_WEBHOOK_ENCRYPT_KEY}',
+        },
+        admins: ['ou_admin'],
+        rules: [
+          {
+            id: 'alarm-card',
+            chatIds: ['oc_alarm'],
+            messageTypes: ['interactive'],
+            cardMatchers: [{ path: '$text', operator: 'regex', value: '报警|alarm' }],
+            requireMention: false,
+            promptTemplate: '分析报警',
+            cooldownMs: 1000,
+          },
+          {
+            id: '',
+          },
+        ],
+      },
+    });
+
+    expect(cfg.larkBot).toMatchObject({
+      listener: {
+        enabled: true,
+        host: '127.0.0.1',
+        port: 9090,
+        webhookPath: '/lark/events',
+      },
+      admins: ['ou_admin'],
+      rules: [
+        {
+          id: 'alarm-card',
+          chatIds: ['oc_alarm'],
+          messageTypes: ['interactive'],
+          requireMention: false,
+          promptTemplate: '分析报警',
+          cooldownMs: 1000,
+        },
+      ],
+    });
+  });
 });

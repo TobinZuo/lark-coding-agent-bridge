@@ -85,6 +85,56 @@ export interface AppAccess {
   admins?: string[];
 }
 
+export type LarkBotMessageType = 'text' | 'post' | 'interactive' | 'image' | 'file' | 'audio' | 'media' | 'sticker' | 'system';
+
+export interface LarkBotListenerConfig {
+  enabled?: boolean;
+  host?: string;
+  port?: number;
+  webhookPath?: string;
+  verificationToken?: SecretInput;
+  encryptKey?: SecretInput;
+  maxBodyBytes?: number;
+  eventMaxAgeMs?: number;
+}
+
+export interface LarkBotTextMatcher {
+  type?: 'contains' | 'equals' | 'regex';
+  value: string;
+  caseSensitive?: boolean;
+}
+
+export interface LarkBotCardMatcher {
+  path?: string;
+  operator?: 'exists' | 'equals' | 'contains' | 'regex';
+  value?: unknown;
+  caseSensitive?: boolean;
+}
+
+export interface LarkBotTriggerRule {
+  id: string;
+  enabled?: boolean;
+  chatIds?: string[];
+  messageTypes?: LarkBotMessageType[];
+  textMatchers?: Array<string | LarkBotTextMatcher>;
+  cardMatchers?: LarkBotCardMatcher[];
+  templateIds?: string[];
+  senderIds?: string[];
+  requireMention?: boolean;
+  agentProfile?: string;
+  promptTemplate?: string;
+  replyInThread?: boolean;
+  cooldownMs?: number;
+}
+
+export interface LarkBotConfig {
+  listener?: LarkBotListenerConfig;
+  rules?: LarkBotTriggerRule[];
+  admins?: string[];
+  defaultReplyMode?: MessageReplyMode;
+  dedupeTtlMs?: number;
+}
+
 export interface AppPreferences {
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
@@ -152,6 +202,7 @@ export interface AppConfig {
     app: AppCredentials;
   };
   secrets?: SecretsConfig;
+  larkBot?: LarkBotConfig;
   preferences?: AppPreferences;
 }
 
