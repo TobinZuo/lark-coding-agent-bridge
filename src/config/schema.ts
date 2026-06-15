@@ -85,6 +85,33 @@ export interface AppAccess {
   admins?: string[];
 }
 
+/**
+ * Optional message-triggered automation. These rules are evaluated after the
+ * normal chat/user access gate but before the group @-mention gate, allowing
+ * tightly scoped service-card workflows without opening the whole group to
+ * every message.
+ */
+export interface AutoTriggerRule {
+  /** Operator-facing label used in logs. */
+  name?: string;
+  /** Defaults to true. Set false to keep the rule in config but inactive. */
+  enabled?: boolean;
+  /** Restrict to specific group/chat ids. Empty/omitted means any allowed chat. */
+  chatIds?: string[];
+  /** Restrict to specific sender open_ids/app ids. Empty/omitted means any sender. */
+  senderIds?: string[];
+  /** Restrict to sender type inferred from Feishu raw event. */
+  senderTypes?: Array<'user' | 'bot'>;
+  /** Restrict to normalized raw content type, for example `interactive`. */
+  rawContentTypes?: string[];
+  /** All listed strings must appear in the rendered or raw message/card content. */
+  contentIncludes?: string[];
+  /** At least one listed string must appear in the rendered or raw content. */
+  contentAnyIncludes?: string[];
+  /** Instruction prepended to the triggering message before it is sent to the agent. */
+  prompt?: string;
+}
+
 export interface AppPreferences {
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
@@ -126,6 +153,12 @@ export interface AppPreferences {
    * Cloud-doc comments still require @-mention unconditionally.
    */
   requireMentionInGroup?: boolean;
+  /**
+   * Auto-trigger rules for message/card workflows such as Argos alarm cards.
+   * Disabled by default. Matching rules still respect allowedChats/admin/owner
+   * access gates and do not grant access to unallowed groups.
+   */
+  autoTriggers?: AutoTriggerRule[];
   /** Access control — user/chat allowlists + admin gating. See AppAccess. */
   access?: AppAccess;
   /**

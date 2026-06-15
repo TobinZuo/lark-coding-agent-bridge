@@ -62,6 +62,7 @@ import { fetchQuotedContext, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
+import { matchAutoTrigger, withAutoTriggerPrompt } from './auto-trigger';
 
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
@@ -543,6 +544,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  const autoTrigger = matchAutoTrigger(msg, controls.cfg, {
+    botOpenId: channel.botIdentity?.openId,
+  });
+
   // Group-mention policy. p2p is always unrestricted; in groups (regular and
   // topic) we drop messages that don't @bot when the user has opted into the
   // quiet-by-default behavior. Slash commands are NOT exempt — the user
@@ -552,42 +557,57 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   if (
     msg.chatType !== 'p2p' &&
     getRequireMentionInGroup(controls.cfg) &&
-    !msg.mentionedBot
+    !msg.mentionedBot &&
+    !autoTrigger
   ) {
     log.info('intake', 'skip-no-mention', { scope, chatType: msg.chatType });
     return;
   }
-
-  const handled = await tryHandleCommand({
-    channel,
-    msg,
-    scope,
-    chatMode,
-    sessions,
-    workspaces,
-    agent,
-    activeRuns,
-    sessionCatalog,
-    sessionCatalogIdentity: await commandSessionCatalogIdentity({
-      msg,
+  if (autoTrigger && msg.chatType !== 'p2p' && !msg.mentionedBot) {
+    log.info('intake', 'auto-trigger-bypass-mention', {
       scope,
-      mode: chatMode,
-      workspaces,
-      controls,
-      access: accessDecision,
-    }),
-    runExecutor: executor,
-    processPool: pool,
-    controls,
-  });
-  if (handled) {
-    const dropped = pending.cancel(scope);
-    log.info('intake', 'command', { scope, droppedPending: dropped.length });
-    return;
+      rule: autoTrigger.ruleName,
+    });
   }
 
-  const size = pending.push(scope, msg);
-  log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+  if (!autoTrigger) {
+    const handled = await tryHandleCommand({
+      channel,
+      msg,
+      scope,
+      chatMode,
+      sessions,
+      workspaces,
+      agent,
+      activeRuns,
+      sessionCatalog,
+      sessionCatalogIdentity: await commandSessionCatalogIdentity({
+        msg,
+        scope,
+        mode: chatMode,
+        workspaces,
+        controls,
+        access: accessDecision,
+      }),
+      runExecutor: executor,
+      processPool: pool,
+      controls,
+    });
+    if (handled) {
+      const dropped = pending.cancel(scope);
+      log.info('intake', 'command', { scope, droppedPending: dropped.length });
+      return;
+    }
+  }
+
+  const queuedMsg = autoTrigger ? withAutoTriggerPrompt(msg, autoTrigger) : msg;
+  const size = pending.push(scope, queuedMsg);
+  log.info('intake', 'queued', {
+    scope,
+    queueSize: size,
+    debounceMs: DEBOUNCE_MS,
+    ...(autoTrigger ? { autoTrigger: autoTrigger.ruleName } : {}),
+  });
 }
 
 interface RunBatchDeps {

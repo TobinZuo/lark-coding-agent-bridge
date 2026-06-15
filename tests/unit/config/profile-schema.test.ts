@@ -115,6 +115,46 @@ describe('profile schema', () => {
     });
   });
 
+  it('normalizes auto trigger rules and drops invalid entries', () => {
+    const cfg = normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'claude',
+      accounts: { app },
+      preferences: {
+        autoTriggers: [
+          {
+            name: ' Argos alarms ',
+            enabled: true,
+            chatIds: ['oc_alarm', 123],
+            senderIds: ['cli_argos'],
+            senderTypes: ['bot', 'robot'],
+            rawContentTypes: ['interactive'],
+            contentIncludes: ['服务:', '报警时间:'],
+            contentAnyIncludes: ['Argos报警值守', 'Service throws panic'],
+            prompt: ' 请自动分析 ',
+            ignored: 'field',
+          },
+          { name: 'no matcher' },
+          null,
+        ],
+      } as never,
+    });
+
+    expect(cfg.preferences.autoTriggers).toEqual([
+      {
+        name: 'Argos alarms',
+        enabled: true,
+        chatIds: ['oc_alarm'],
+        senderIds: ['cli_argos'],
+        senderTypes: ['bot'],
+        rawContentTypes: ['interactive'],
+        contentIncludes: ['服务:', '报警时间:'],
+        contentAnyIncludes: ['Argos报警值守', 'Service throws panic'],
+        prompt: '请自动分析',
+      },
+    ]);
+  });
+
   it('normalizes workspaces to a default working directory only', () => {
     const cfg = createDefaultProfileConfig({
       agentKind: 'claude',

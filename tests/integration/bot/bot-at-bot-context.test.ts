@@ -81,6 +81,60 @@ describe('bot identity injection into the agent adapter', () => {
 });
 
 describe('sender identity in bridge_context', () => {
+  it('auto-triggers configured alarm cards in groups without requiring an @ mention', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences.autoTriggers = [
+      {
+        name: 'argos-alarm',
+        chatIds: ['oc_chat'],
+        senderIds: ['cli_argos'],
+        senderTypes: ['bot'],
+        rawContentTypes: ['interactive'],
+        contentIncludes: ['服务:', '报警时间:'],
+        contentAnyIncludes: ['Argos报警值守', 'Service throws panic'],
+        prompt: '请自动分析这条告警卡片',
+      },
+    ];
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_alarm',
+        senderId: 'cli_argos',
+        senderName: 'Argos',
+        content:
+          '[warning] Service throws panic\n服务: data.ecom.aigc_gateway\n报警时间: 2026-06-15 07:43:29\nArgos报警值守',
+        rawSenderType: 'app',
+        rawContentType: 'interactive',
+        rawMessageContent: JSON.stringify({
+          schema: '2.0',
+          body: {
+            elements: [
+              {
+                tag: 'markdown',
+                content: '[warning] Service throws panic',
+              },
+            ],
+          },
+        }),
+        mentionedBot: false,
+        mentions: [],
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    const userInput = readSection(h.agent.runOptions[0]?.prompt ?? '', 'user_input') as {
+      text: string;
+    };
+    expect(userInput.text).toContain('请自动分析这条告警卡片');
+    expect(userInput.text).toContain('Service throws panic');
+    const cards = readSection(h.agent.runOptions[0]?.prompt ?? '', 'interactive_cards') as Array<{
+      messageId?: string;
+      content?: unknown;
+    }>;
+    expect(cards[0]?.messageId).toBe('om_alarm');
+  });
+
   it('marks a bot sender via raw sender_type and injects botOpenId and mentions', async () => {
     const h = await createHarness();
     await startTestBridge(h);
@@ -366,8 +420,12 @@ function message(input: {
   senderId?: string;
   senderName?: string;
   rawSenderType?: string;
+  rawContentType?: string;
+  rawMessageContent?: string;
+  mentionedBot?: boolean;
   mentions?: Array<{ key: string; openId?: string; name?: string; isBot?: boolean }>;
 }): NormalizedMessage {
+  const mentionedBot = input.mentionedBot ?? true;
   return {
     messageId: input.messageId,
     chatId: 'oc_chat',
@@ -375,22 +433,29 @@ function message(input: {
     senderId: input.senderId ?? 'ou_user',
     senderName: input.senderName ?? 'User',
     content: input.content,
-    rawContentType: 'text',
+    rawContentType: input.rawContentType ?? 'text',
     resources: [],
-    mentions: input.mentions ?? [
-      { key: '@_user_1', openId: 'ou_bot', name: 'Bridge', isBot: true },
-    ],
+    mentions: input.mentions ?? (mentionedBot
+      ? [{ key: '@_user_1', openId: 'ou_bot', name: 'Bridge', isBot: true }]
+      : []),
     mentionAll: false,
-    mentionedBot: true,
+    mentionedBot,
     createTime: 1760000001000,
-    ...(input.rawSenderType
+    ...(input.rawSenderType || input.rawMessageContent
       ? {
           raw: {
-            sender: {
-              sender_id: { open_id: input.senderId ?? 'ou_user' },
-              sender_type: input.rawSenderType,
+            ...(input.rawSenderType
+              ? {
+                  sender: {
+                    sender_id: { open_id: input.senderId ?? 'ou_user' },
+                    sender_type: input.rawSenderType,
+                  },
+                }
+              : {}),
+            message: {
+              message_id: input.messageId,
+              ...(input.rawMessageContent ? { content: input.rawMessageContent } : {}),
             },
-            message: { message_id: input.messageId },
           },
         }
       : {}),

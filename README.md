@@ -160,6 +160,32 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 
 DMs do not require an @ mention. Groups and topic groups require `@bot` by default; `@all` is ignored. Cloud-doc comments in supported document types run when the bot is mentioned.
 
+### Auto-triggered alarm cards
+
+Profiles can define `preferences.autoTriggers` for tightly scoped card workflows such as Argos alarm analysis. Auto triggers are evaluated after normal access control, so the group must still be in `access.allowedChats` (or the sender must be owner/admin). A matching rule may bypass the group `@bot` requirement for that one message only; ordinary group chatter remains quiet.
+
+This is a profile-field snippet. Do not replace the whole `config.json`; edit the matching profile's `preferences` field.
+
+```json
+{
+  "preferences": {
+    "autoTriggers": [
+      {
+        "name": "argos-alarm",
+        "enabled": true,
+        "chatIds": ["oc_xxx"],
+        "senderIds": ["cli_argos_alarm_bot"],
+        "senderTypes": ["bot"],
+        "rawContentTypes": ["interactive"],
+        "contentIncludes": ["服务:", "报警时间:"],
+        "contentAnyIncludes": ["Argos报警值守", "Service throws panic"],
+        "prompt": "请自动分析这条飞书告警卡片。只读排查报警原因，输出结论、影响窗口、证据链、当前状态和建议动作；不要自动 ACK、屏蔽或修改线上配置。"
+      }
+    ]
+  }
+}
+```
+
 ## lark-cli identity policy
 
 Each profile uses a profile-local lark-cli directory at `~/.lark-channel/profiles/<profile>/lark-cli`. The agent process receives `LARKSUITE_CLI_CONFIG_DIR` for that directory, so personal authorization in one profile is not shared with another profile.

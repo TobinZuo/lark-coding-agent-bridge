@@ -160,6 +160,32 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 
 私聊不需要 @。群和话题群默认必须 `@bot`；`@all` 会被忽略。支持的云文档评论里 @bot 就会触发回复。
 
+### 自动触发告警卡片
+
+profile 可以配置 `preferences.autoTriggers`，用于 Argos 告警自动分析这类范围很窄的卡片工作流。自动触发仍然先经过正常访问控制，所以群必须在 `access.allowedChats` 里（或发送者是 owner/admin）。规则命中时，只对这一条消息绕过群聊 `@bot` 要求；普通群聊消息仍然保持静默。
+
+下面只是 profile 里的字段片段，不要整段覆盖 `config.json`；请改对应 profile 下的 `preferences` 字段。
+
+```json
+{
+  "preferences": {
+    "autoTriggers": [
+      {
+        "name": "argos-alarm",
+        "enabled": true,
+        "chatIds": ["oc_xxx"],
+        "senderIds": ["cli_argos_alarm_bot"],
+        "senderTypes": ["bot"],
+        "rawContentTypes": ["interactive"],
+        "contentIncludes": ["服务:", "报警时间:"],
+        "contentAnyIncludes": ["Argos报警值守", "Service throws panic"],
+        "prompt": "请自动分析这条飞书告警卡片。只读排查报警原因，输出结论、影响窗口、证据链、当前状态和建议动作；不要自动 ACK、屏蔽或修改线上配置。"
+      }
+    ]
+  }
+}
+```
+
 ## lark-cli 身份策略
 
 每个 profile 都使用当前 profile 的 lark-cli 目录：`~/.lark-channel/profiles/<profile>/lark-cli`。agent 子进程会收到指向这个目录的 `LARKSUITE_CLI_CONFIG_DIR`，所以一个 profile 里的个人授权不会共享给另一个 profile。

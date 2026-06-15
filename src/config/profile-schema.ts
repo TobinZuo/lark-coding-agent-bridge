@@ -1,4 +1,5 @@
 import type {
+  AutoTriggerRule,
   AppCredentials,
   AppPreferences,
   MessageReplyMode,
@@ -229,16 +230,22 @@ function normalizePreferences(
   const {
     access: _access,
     requireMentionInGroup: _mention,
+    autoTriggers,
     messageReply,
     ...rest
   } = preferences ?? {};
+  const normalizedAutoTriggers = normalizeAutoTriggers(autoTriggers);
+  const normalized: ProfileConfig['preferences'] = {
+    ...rest,
+    ...(normalizedAutoTriggers.length > 0 ? { autoTriggers: normalizedAutoTriggers } : {}),
+  };
   if (messageReply !== undefined && isMessageReply(messageReply)) {
     return {
-      ...rest,
+      ...normalized,
       messageReply,
     };
   }
-  return rest;
+  return normalized;
 }
 
 function isMessageReply(value: unknown): value is MessageReplyMode {
@@ -287,6 +294,49 @@ function normalizeCodex(input: CodexConfig & { flags?: unknown }): CodexConfig {
 
 function normalizeComments(_input: unknown): CommentConfig {
   return {};
+}
+
+function normalizeAutoTriggers(input: unknown): AutoTriggerRule[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((item) => normalizeAutoTrigger(item))
+    .filter((item): item is AutoTriggerRule => item !== undefined);
+}
+
+function normalizeAutoTrigger(input: unknown): AutoTriggerRule | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const raw = input as Record<string, unknown>;
+  const senderTypes = stringArray(raw.senderTypes).filter(
+    (value): value is 'user' | 'bot' => value === 'user' || value === 'bot',
+  );
+  const out: AutoTriggerRule = {
+    ...(typeof raw.name === 'string' && raw.name.trim() ? { name: raw.name.trim() } : {}),
+    ...(typeof raw.enabled === 'boolean' ? { enabled: raw.enabled } : {}),
+    ...nonEmptyArrayProp('chatIds', raw.chatIds),
+    ...nonEmptyArrayProp('senderIds', raw.senderIds),
+    ...(senderTypes.length > 0 ? { senderTypes } : {}),
+    ...nonEmptyArrayProp('rawContentTypes', raw.rawContentTypes),
+    ...nonEmptyArrayProp('contentIncludes', raw.contentIncludes),
+    ...nonEmptyArrayProp('contentAnyIncludes', raw.contentAnyIncludes),
+    ...(typeof raw.prompt === 'string' && raw.prompt.trim() ? { prompt: raw.prompt.trim() } : {}),
+  };
+  const hasMatcher = Boolean(
+    out.chatIds?.length ||
+      out.senderIds?.length ||
+      out.senderTypes?.length ||
+      out.rawContentTypes?.length ||
+      out.contentIncludes?.length ||
+      out.contentAnyIncludes?.length,
+  );
+  return hasMatcher ? out : undefined;
+}
+
+function nonEmptyArrayProp<K extends keyof AutoTriggerRule>(
+  key: K,
+  value: unknown,
+): Pick<AutoTriggerRule, K> | Record<string, never> {
+  const items = stringArray(value).map((item) => item.trim()).filter(Boolean);
+  return items.length > 0 ? ({ [key]: items } as Pick<AutoTriggerRule, K>) : {};
 }
 
 function normalizeLarkCli(input: unknown): LarkCliConfig {
