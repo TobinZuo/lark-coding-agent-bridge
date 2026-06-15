@@ -65,7 +65,9 @@ import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import {
   AutoAnswerRuntime,
+  type AutoDedupeRecord,
   type AutoRulePlanner,
+  type RuleMatch,
   autoAnswerMeta,
   normalizeIncomingMessage,
   normalizedMessageFromIncoming,
@@ -578,6 +580,52 @@ async function sendNonAllowedGroupHint(
   }
 }
 
+async function sendAutoDuplicateNotice(
+  channel: LarkChannel,
+  msg: NormalizedMessage,
+  match: RuleMatch,
+  record: AutoDedupeRecord,
+): Promise<void> {
+  const text = [
+    `同类消息在 ${formatDuration(record.ttlMs)} 内重复，已处理过。`,
+    `上次处理时间：${formatLocalTimestamp(record.firstSeenAt)}`,
+    '本次不重复触发分析。',
+  ].join('\n');
+  const sendOpts = {
+    replyTo: msg.messageId,
+    ...((match.rule.replyInThread ?? Boolean(msg.threadId)) ? { replyInThread: true } : {}),
+  };
+  try {
+    await channel.send(msg.chatId, { markdown: text }, sendOpts);
+  } catch {
+    await channel.send(msg.chatId, { markdown: text });
+  }
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.max(1, Math.ceil(ms / 1000))} 秒`;
+  if (ms % 60_000 === 0) return `${Math.max(1, Math.round(ms / 60_000))} 分钟`;
+  return `${Math.max(1, Math.ceil(ms / 60_000))} 分钟`;
+}
+
+function formatLocalTimestamp(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return [
+    d.getFullYear(),
+    '-',
+    pad(d.getMonth() + 1),
+    '-',
+    pad(d.getDate()),
+    ' ',
+    pad(d.getHours()),
+    ':',
+    pad(d.getMinutes()),
+    ':',
+    pad(d.getSeconds()),
+  ].join('');
+}
+
 interface IntakeDeps {
   channel: LarkChannel;
   agent: AgentAdapter;
@@ -755,12 +803,29 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       });
       return;
     }
-    if (!autoAnswer.tryRecordFingerprint(autoMatch.rule, autoMatch.fingerprint, controls.cfg.larkBot?.dedupeTtlMs)) {
-      log.info('auto-answer', 'dedupe-fingerprint', { ruleId: autoMatch.rule.id, chatId: msg.chatId });
+    const autoMessageDedupeTtlMs = Math.max(
+      controls.cfg.larkBot?.dedupeTtlMs ?? 10 * 60 * 1000,
+      autoMatch.rule.cooldownMs ?? 0,
+    );
+    if (!autoAnswer.tryRecordMessage(msg.messageId, autoMessageDedupeTtlMs)) {
+      log.info('intake', 'auto-duplicate-message', { chatId: msg.chatId, msgId: msg.messageId });
       return;
     }
-    if (!autoAnswer.tryRecordMessage(msg.messageId, controls.cfg.larkBot?.dedupeTtlMs)) {
-      log.info('intake', 'auto-duplicate-message', { chatId: msg.chatId, msgId: msg.messageId });
+    const fingerprintRecord = autoAnswer.tryRecordFingerprint(
+      autoMatch.rule,
+      autoMatch.fingerprint,
+      msg,
+      controls.cfg.larkBot?.dedupeTtlMs,
+    );
+    if (!fingerprintRecord.ok) {
+      log.info('auto-answer', 'dedupe-fingerprint', {
+        ruleId: autoMatch.rule.id,
+        chatId: msg.chatId,
+        messageId: msg.messageId,
+        firstSeenAt: fingerprintRecord.record.firstSeenAt,
+        duplicateCount: fingerprintRecord.record.duplicateCount,
+      });
+      await sendAutoDuplicateNotice(channel, msg, autoMatch, fingerprintRecord.record);
       return;
     }
     msg = autoMatch.message;

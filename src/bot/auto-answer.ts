@@ -49,6 +49,35 @@ export interface RuleMatch {
   fingerprint: string;
 }
 
+export interface AutoDedupeRecord {
+  key: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  expiresAt: number;
+  ttlMs: number;
+  duplicateCount: number;
+  ruleId?: string;
+  chatId?: string;
+  messageId?: string;
+  threadId?: string;
+  fingerprint?: string;
+  lastMessageId?: string;
+  lastThreadId?: string;
+}
+
+export interface AutoDedupeRecordResult {
+  ok: boolean;
+  record: AutoDedupeRecord;
+}
+
+interface AutoDedupeMetadata {
+  ruleId?: string;
+  chatId?: string;
+  messageId?: string;
+  threadId?: string;
+  fingerprint?: string;
+}
+
 interface MatchMessageOptions {
   recordFingerprint?: boolean;
 }
@@ -65,7 +94,7 @@ export type AutoRulePlanner = (request: RulePlannerRequest) => Promise<RulePlann
 
 export class AutoAnswerRuntime {
   private readonly drafts = new Map<string, DraftRule>();
-  private readonly seen = new Map<string, number>();
+  private readonly seen = new Map<string, AutoDedupeRecord>();
 
   constructor(private readonly now: () => number = () => Date.now()) {}
 
@@ -188,7 +217,7 @@ export class AutoAnswerRuntime {
       const fingerprint = fingerprintFor(rule, incoming);
       if (
         options.recordFingerprint !== false &&
-        !this.tryRecordFingerprint(rule, fingerprint, cfg.larkBot?.dedupeTtlMs)
+        !this.tryRecordFingerprint(rule, fingerprint, msg, cfg.larkBot?.dedupeTtlMs).ok
       ) {
         log.info('auto-answer', 'dedupe-fingerprint', { ruleId: rule.id, chatId: incoming.chatId });
         return undefined;
@@ -206,29 +235,64 @@ export class AutoAnswerRuntime {
   }
 
   tryRecordMessage(messageId: string, ttlMs?: number): boolean {
-    return this.tryRecord(`message:${messageId}`, ttlMs);
+    return this.tryRecord(`message:${messageId}`, ttlMs, { messageId }).ok;
   }
 
   tryRecordSettle(ruleId: string, messageId: string, ttlMs?: number): boolean {
-    return this.tryRecord(`settle:${ruleId}:${messageId}`, ttlMs);
+    return this.tryRecord(`settle:${ruleId}:${messageId}`, ttlMs, { ruleId, messageId }).ok;
   }
 
-  tryRecordFingerprint(rule: LarkBotTriggerRule, fingerprint: string, ttlMs?: number): boolean {
-    return this.tryRecord(`fingerprint:${fingerprint}`, rule.cooldownMs ?? ttlMs);
+  tryRecordFingerprint(
+    rule: LarkBotTriggerRule,
+    fingerprint: string,
+    msg: NormalizedMessage,
+    ttlMs?: number,
+  ): AutoDedupeRecordResult {
+    return this.tryRecord(`fingerprint:${fingerprint}`, rule.cooldownMs ?? ttlMs, {
+      ruleId: rule.id,
+      chatId: msg.chatId,
+      messageId: msg.messageId,
+      threadId: msg.threadId,
+      fingerprint,
+    });
   }
 
-  private tryRecord(key: string, ttlMs = DEFAULT_DEDUPE_TTL_MS): boolean {
+  private tryRecord(
+    key: string,
+    ttlMs = DEFAULT_DEDUPE_TTL_MS,
+    metadata: AutoDedupeMetadata = {},
+  ): AutoDedupeRecordResult {
     const now = this.now();
     this.gc(now);
-    const expiresAt = this.seen.get(key);
-    if (expiresAt && expiresAt > now) return false;
-    this.seen.set(key, now + Math.max(1, ttlMs));
-    return true;
+    const existing = this.seen.get(key);
+    if (existing && existing.expiresAt > now) {
+      const next: AutoDedupeRecord = {
+        ...existing,
+        lastSeenAt: now,
+        duplicateCount: existing.duplicateCount + 1,
+      };
+      if (metadata.messageId) next.lastMessageId = metadata.messageId;
+      if (metadata.threadId) next.lastThreadId = metadata.threadId;
+      this.seen.set(key, next);
+      return { ok: false, record: next };
+    }
+    const safeTtlMs = Math.max(1, ttlMs);
+    const record: AutoDedupeRecord = {
+      key,
+      firstSeenAt: now,
+      lastSeenAt: now,
+      expiresAt: now + safeTtlMs,
+      ttlMs: safeTtlMs,
+      duplicateCount: 0,
+      ...metadata,
+    };
+    this.seen.set(key, record);
+    return { ok: true, record };
   }
 
   private gc(now: number): void {
-    for (const [key, expiresAt] of this.seen) {
-      if (expiresAt <= now) this.seen.delete(key);
+    for (const [key, record] of this.seen) {
+      if (record.expiresAt <= now) this.seen.delete(key);
     }
     for (const [key, draft] of this.drafts) {
       if (draft.createdAt + 10 * 60 * 1000 <= now) this.drafts.delete(key);

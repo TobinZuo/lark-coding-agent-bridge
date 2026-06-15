@@ -168,6 +168,57 @@ describe('auto-answer bot rules', () => {
     expect(second).toBeUndefined();
   });
 
+  it('keeps metadata for duplicate fingerprint hits', () => {
+    let now = 1000;
+    const runtime = new AutoAnswerRuntime(() => now);
+    const cfg: AppConfig = {
+      accounts: { app },
+      larkBot: {
+        dedupeTtlMs: 60_000,
+        rules: [
+          {
+            id: 'alarm-card',
+            chatIds: ['oc_alarm'],
+            messageTypes: ['interactive'],
+            cardMatchers: [{ path: '$text', operator: 'contains', value: '报警' }],
+            cooldownMs: 300_000,
+          },
+        ],
+      },
+    };
+    const firstMsg = normalizedMessage({
+      content: JSON.stringify({ body: { elements: [{ content: '数据库报警' }] } }),
+      rawContentType: 'interactive',
+    });
+    const firstMatch = runtime.matchMessage(cfg, firstMsg, undefined, undefined, { recordFingerprint: false });
+    if (!firstMatch) throw new Error('expected first match');
+
+    const first = runtime.tryRecordFingerprint(firstMatch.rule, firstMatch.fingerprint, firstMsg, cfg.larkBot?.dedupeTtlMs);
+
+    now = 11_000;
+    const duplicateMsg = { ...firstMsg, messageId: 'om_alarm_dup' } as NormalizedMessage;
+    const second = runtime.tryRecordFingerprint(
+      firstMatch.rule,
+      firstMatch.fingerprint,
+      duplicateMsg,
+      cfg.larkBot?.dedupeTtlMs,
+    );
+
+    expect(first.ok).toBe(true);
+    expect(first.record.ttlMs).toBe(300_000);
+    expect(second.ok).toBe(false);
+    expect(second.record).toMatchObject({
+      firstSeenAt: 1000,
+      lastSeenAt: 11_000,
+      duplicateCount: 1,
+      ruleId: 'alarm-card',
+      chatId: 'oc_alarm',
+      messageId: 'om_alarm',
+      lastMessageId: 'om_alarm_dup',
+      ttlMs: 300_000,
+    });
+  });
+
   it('only treats explicit alarm-card setup commands as rule requests', () => {
     expect(isAlarmRuleRequestText('请配置这个群的告警卡片自动分析规则')).toBe(false);
     expect(isAlarmRuleRequestText('/alarm-card-rule 告警卡片 自动分析')).toBe(true);
