@@ -64,6 +64,7 @@ import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import { AutoAnswerRuntime, autoAnswerMeta } from './auto-answer';
 import { startWebhookListener, type WebhookListener } from './webhook-listener';
+import { startLarkEventConsumer, type LarkEventConsumer } from './event-consumer';
 
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
@@ -168,7 +169,17 @@ export interface StartChannelDeps {
   sessionCatalog?: SessionCatalog;
   workspaces: WorkspaceStore;
   controls: Controls;
-  appPaths?: Pick<AppPaths, 'secretsFile' | 'keystoreSaltFile' | 'mediaDir'>;
+  appPaths?: Pick<
+    AppPaths,
+    | 'secretsFile'
+    | 'keystoreSaltFile'
+    | 'mediaDir'
+    | 'rootDir'
+    | 'profile'
+    | 'configFile'
+    | 'larkCliConfigDir'
+    | 'larkCliSourceConfigFile'
+  >;
 }
 
 export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
@@ -404,9 +415,39 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           executor,
           pool,
           autoAnswer,
+          autoOnly: true,
         }),
       ).catch((err) => log.fail('webhook-intake', err));
     },
+  });
+  const eventConsumer = await startLarkEventConsumer({
+    cfg,
+    appPaths: deps.appPaths,
+    configPath: controls.configPath,
+    botOpenId: channel.botIdentity?.openId,
+    onMessage: async (msg) => {
+      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
+        intakeMessage({
+          channel,
+          agent,
+          sessions,
+          sessionCatalog,
+          workspaces,
+          activeRuns,
+          pending,
+          msg,
+          controls,
+          chatModeCache,
+          executor,
+          pool,
+          autoAnswer,
+          autoOnly: true,
+        }),
+      ).catch((err) => log.fail('event-consumer-intake', err));
+    },
+  }).catch((err) => {
+    log.fail('event-consumer', err, { step: 'start' });
+    return undefined;
   });
 
   const identity = channel.botIdentity;
@@ -449,6 +490,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       knownChatsRefresh.stop();
       keepalive.stop();
       await stopWebhookListener(webhookListener);
+      await stopEventConsumer(eventConsumer);
       pending.cancelAll();
       const [disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),
@@ -502,6 +544,15 @@ async function stopWebhookListener(listener: WebhookListener | undefined): Promi
   }
 }
 
+async function stopEventConsumer(consumer: LarkEventConsumer | undefined): Promise<void> {
+  if (!consumer) return;
+  try {
+    await consumer.stop();
+  } catch (err) {
+    log.fail('event-consumer', err, { step: 'stop' });
+  }
+}
+
 async function sendNonAllowedGroupHint(
   channel: LarkChannel,
   chatId: string,
@@ -531,6 +582,7 @@ interface IntakeDeps {
   executor: RunExecutor;
   pool: ProcessPool;
   autoAnswer: AutoAnswerRuntime;
+  autoOnly?: boolean;
 }
 
 async function intakeMessage(deps: IntakeDeps): Promise<void> {
@@ -547,14 +599,20 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     executor,
     pool,
     autoAnswer,
+    autoOnly,
   } = deps;
   let { msg } = deps;
-  const configHandled = await autoAnswer.tryHandleAdminConfig({ channel, controls, msg });
-  if (configHandled) {
-    log.info('intake', 'auto-config-command', { chatId: msg.chatId, msgId: msg.messageId });
-    return;
+  if (!autoOnly) {
+    const configHandled = await autoAnswer.tryHandleAdminConfig({ channel, controls, msg });
+    if (configHandled) {
+      log.info('intake', 'auto-config-command', { chatId: msg.chatId, msgId: msg.messageId });
+      return;
+    }
   }
   const autoMatch = autoAnswer.matchMessage(controls.cfg, msg, channel.botIdentity?.openId, controls.profile);
+  if (autoOnly && !autoMatch) {
+    return;
+  }
   if (autoMatch) {
     if (!autoAnswer.tryRecordMessage(msg.messageId, controls.cfg.larkBot?.dedupeTtlMs)) {
       log.info('intake', 'auto-duplicate-message', { chatId: msg.chatId, msgId: msg.messageId });

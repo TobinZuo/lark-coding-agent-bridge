@@ -162,11 +162,43 @@ DMs do not require an @ mention. Groups and topic groups require `@bot` by defau
 
 ## Group auto-answer rules
 
-The bridge can also run a persistent Webhook listener for Feishu / Lark events and dispatch matching group messages to the local agent automatically. It does not listen to every casual message by default. Only messages matching `larkBot.rules`, or rules explicitly drafted and confirmed by an admin in chat, trigger the agent.
+The bridge can dispatch matching group messages to the local agent automatically. It does not listen to every casual message by default. Only messages matching `larkBot.rules`, or rules explicitly drafted and confirmed by an admin in chat, trigger the agent.
 
-In the Feishu / Lark developer console, subscribe the app to `im.message.receive_v1` and set the request URL to your public Webhook endpoint, for example `https://example.com/lark/events`. The local listener defaults to `0.0.0.0:8787/lark/events`; production deployments usually need a reverse proxy or tunnel.
+There are two event entry points:
+
+- **No public domain**: switch event subscriptions to long-connection mode in the Feishu / Lark developer console, subscribe to `im.message.receive_v1`, then enable `larkBot.eventConsumer.enabled`. The bridge consumes events through `lark-cli event consume` for the current profile.
+- **HTTP Webhook**: subscribe to `im.message.receive_v1` and set the request URL to your public Webhook endpoint, for example `https://example.com/lark/events`. The local listener defaults to `0.0.0.0:8787/lark/events`; production deployments usually need a reverse proxy or tunnel.
 
 This is a profile-field snippet. Do not replace the whole `config.json` with it; edit the matching profile's `larkBot` field.
+
+Long-connection event consumption without a public domain:
+
+```json
+{
+  "larkBot": {
+    "eventConsumer": {
+      "enabled": true
+    },
+    "rules": [
+      {
+        "id": "alarm-card",
+        "enabled": true,
+        "chatIds": ["oc_xxx"],
+        "messageTypes": ["interactive"],
+        "cardMatchers": [
+          { "path": "$text", "operator": "regex", "value": "报警|告警|alarm|critical|error" }
+        ],
+        "requireMention": false,
+        "replyInThread": true,
+        "cooldownMs": 300000,
+        "promptTemplate": "This is an alert card from the group. Summarize the alert, assess impact, list likely causes, and suggest next debugging steps."
+      }
+    ]
+  }
+}
+```
+
+HTTP Webhook:
 
 ```json
 {

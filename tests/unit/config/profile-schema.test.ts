@@ -552,6 +552,12 @@ describe('profile schema', () => {
           verificationToken: '${LARK_WEBHOOK_TOKEN}',
           encryptKey: '${LARK_WEBHOOK_ENCRYPT_KEY}',
         },
+        eventConsumer: {
+          enabled: true,
+          command: 'lark-cli',
+          eventKey: 'im.message.receive_v1',
+          readyTimeoutMs: 5000,
+        },
         admins: ['ou_admin'],
         rules: [
           {
@@ -576,6 +582,12 @@ describe('profile schema', () => {
         host: '127.0.0.1',
         port: 9090,
         webhookPath: '/lark/events',
+      },
+      eventConsumer: {
+        enabled: true,
+        command: 'lark-cli',
+        eventKey: 'im.message.receive_v1',
+        readyTimeoutMs: 5000,
       },
       admins: ['ou_admin'],
       rules: [

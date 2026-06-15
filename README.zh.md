@@ -162,11 +162,43 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 
 ## 群消息自动触发
 
-bridge 可以作为常驻 Webhook 服务接收飞书事件，并按显式规则自动把群消息交给本机 agent。默认不会监听所有闲聊；只有 `larkBot.rules` 命中的消息，或管理员在群里 `@bot` 后确认创建的规则，才会触发。
+bridge 可以按显式规则自动把群消息交给本机 agent。默认不会监听所有闲聊；只有 `larkBot.rules` 命中的消息，或管理员在群里 `@bot` 后确认创建的规则，才会触发。
 
-需要在飞书开放平台给应用订阅 `im.message.receive_v1`，并把请求地址配置为你的公网 Webhook，例如 `https://example.com/lark/events`。本机服务默认监听 `0.0.0.0:8787/lark/events`，生产环境通常需要反向代理或内网穿透。
+有两种事件入口：
+
+- **无公网域名**：在飞书开放平台把事件订阅切到长连接模式，订阅 `im.message.receive_v1`，然后开启 `larkBot.eventConsumer.enabled`。bridge 会通过当前 profile 的 `lark-cli event consume` 消费事件。
+- **HTTP Webhook**：订阅 `im.message.receive_v1`，并把请求地址配置为公网 Webhook，例如 `https://example.com/lark/events`。本机服务默认监听 `0.0.0.0:8787/lark/events`，生产环境通常需要反向代理或内网穿透。
 
 下面只是 profile 里的字段片段，不要整段覆盖 `config.json`；请改对应 profile 下的 `larkBot` 字段。
+
+无公网域名的长连接事件消费：
+
+```json
+{
+  "larkBot": {
+    "eventConsumer": {
+      "enabled": true
+    },
+    "rules": [
+      {
+        "id": "alarm-card",
+        "enabled": true,
+        "chatIds": ["oc_xxx"],
+        "messageTypes": ["interactive"],
+        "cardMatchers": [
+          { "path": "$text", "operator": "regex", "value": "报警|告警|alarm|critical|error" }
+        ],
+        "requireMention": false,
+        "replyInThread": true,
+        "cooldownMs": 300000,
+        "promptTemplate": "这是一张群里的报警卡片。请概括告警、判断影响面、列出可能原因，并给出排查步骤。"
+      }
+    ]
+  }
+}
+```
+
+HTTP Webhook：
 
 ```json
 {

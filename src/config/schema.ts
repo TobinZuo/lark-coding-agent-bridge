@@ -98,6 +98,13 @@ export interface LarkBotListenerConfig {
   eventMaxAgeMs?: number;
 }
 
+export interface LarkBotEventConsumerConfig {
+  enabled?: boolean;
+  command?: string;
+  eventKey?: string;
+  readyTimeoutMs?: number;
+}
+
 export interface LarkBotTextMatcher {
   type?: 'contains' | 'equals' | 'regex';
   value: string;
@@ -129,6 +136,7 @@ export interface LarkBotTriggerRule {
 
 export interface LarkBotConfig {
   listener?: LarkBotListenerConfig;
+  eventConsumer?: LarkBotEventConsumerConfig;
   rules?: LarkBotTriggerRule[];
   admins?: string[];
   defaultReplyMode?: MessageReplyMode;

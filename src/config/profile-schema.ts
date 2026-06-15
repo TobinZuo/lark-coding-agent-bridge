@@ -217,6 +217,7 @@ function normalizeLarkBot(input: unknown): LarkBotConfig | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
   const raw = input as LarkBotConfig;
   const listener = normalizeLarkBotListener(raw.listener);
+  const eventConsumer = normalizeLarkBotEventConsumer(raw.eventConsumer);
   const rules = Array.isArray(raw.rules)
     ? raw.rules
         .map(normalizeLarkBotRule)
@@ -230,10 +231,28 @@ function normalizeLarkBot(input: unknown): LarkBotConfig | undefined {
   const defaultReplyMode = isMessageReply(raw.defaultReplyMode) ? raw.defaultReplyMode : undefined;
   const out: LarkBotConfig = {
     ...(listener ? { listener } : {}),
+    ...(eventConsumer ? { eventConsumer } : {}),
     ...(rules && rules.length > 0 ? { rules } : {}),
     ...(admins.length > 0 ? { admins } : {}),
     ...(defaultReplyMode ? { defaultReplyMode } : {}),
     ...(dedupeTtlMs ? { dedupeTtlMs } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizeLarkBotEventConsumer(
+  input: LarkBotConfig['eventConsumer'] | undefined,
+): LarkBotConfig['eventConsumer'] | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const readyTimeoutMs =
+    typeof input.readyTimeoutMs === 'number' && Number.isFinite(input.readyTimeoutMs) && input.readyTimeoutMs > 0
+      ? Math.floor(input.readyTimeoutMs)
+      : undefined;
+  const out: NonNullable<LarkBotConfig['eventConsumer']> = {
+    ...(typeof input.enabled === 'boolean' ? { enabled: input.enabled } : {}),
+    ...(typeof input.command === 'string' && input.command.trim() ? { command: input.command.trim() } : {}),
+    ...(typeof input.eventKey === 'string' && input.eventKey.trim() ? { eventKey: input.eventKey.trim() } : {}),
+    ...(readyTimeoutMs ? { readyTimeoutMs } : {}),
   };
   return Object.keys(out).length > 0 ? out : undefined;
 }
