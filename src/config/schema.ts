@@ -132,6 +132,9 @@ export interface LarkBotTriggerRule {
   promptTemplate?: string;
   replyInThread?: boolean;
   cooldownMs?: number;
+  /** Wait before handling a matched message, then refetch the same message_id.
+   * Useful for cards that are updated in place shortly after delivery. */
+  settleMs?: number;
 }
 
 export interface LarkBotConfig {

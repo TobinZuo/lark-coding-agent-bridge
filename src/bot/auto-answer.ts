@@ -139,6 +139,10 @@ export class AutoAnswerRuntime {
     return this.tryRecord(`message:${messageId}`, ttlMs);
   }
 
+  tryRecordSettle(ruleId: string, messageId: string, ttlMs?: number): boolean {
+    return this.tryRecord(`settle:${ruleId}:${messageId}`, ttlMs);
+  }
+
   private tryRecord(key: string, ttlMs = DEFAULT_DEDUPE_TTL_MS): boolean {
     const now = this.now();
     this.gc(now);
@@ -327,8 +331,18 @@ function isAutoAnswerAdmin(controls: Controls, senderId: string): boolean {
   return controls.cfg.larkBot?.admins?.includes(senderId) === true;
 }
 
-function isAlarmRuleRequestText(text: string): boolean {
-  return /报警卡片|告警卡片|alarm card|alert card/i.test(text) && /每出现|出现.*分析|自动分析|分析一次/i.test(text);
+export function isAlarmRuleRequestText(text: string): boolean {
+  const normalized = text.trim();
+  if (!/报警卡片|告警卡片|alarm card|alert card/i.test(normalized)) return false;
+  if (/^\/(?:auto-)?(?:alarm|alert)-card(?:-rule)?\b/i.test(normalized)) return true;
+
+  const hasChineseSetupVerb = /创建|新建|新增|添加|配置|设置|设定|启用|生成/.test(normalized);
+  const hasChineseRuleIntent = /规则|自动分析|自动回复|自动处理|监听/.test(normalized);
+  if (hasChineseSetupVerb && hasChineseRuleIntent) return true;
+
+  const hasEnglishSetupVerb = /\b(?:create|add|configure|setup|set up|enable|generate)\b/i.test(normalized);
+  const hasEnglishRuleIntent = /\b(?:rule|auto(?:matic)?(?:ly)?|analysis|analyze|reply|monitor|watch)\b/i.test(normalized);
+  return hasEnglishSetupVerb && hasEnglishRuleIntent;
 }
 
 function isConfirmAlarmRuleText(text: string): boolean {
@@ -354,6 +368,7 @@ function buildAlarmCardRule(msg: NormalizedMessage): LarkBotTriggerRule {
       '这是一张群里的报警卡片。请结合卡片内容做一次值班分析：概括告警、判断影响面、列出可能原因、给出排查步骤和下一步建议。',
     replyInThread: true,
     cooldownMs: 5 * 60 * 1000,
+    settleMs: 60 * 1000,
   };
 }
 

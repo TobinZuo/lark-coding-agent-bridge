@@ -568,6 +568,7 @@ describe('profile schema', () => {
             requireMention: false,
             promptTemplate: '分析报警',
             cooldownMs: 1000,
+            settleMs: 60000,
           },
           {
             id: '',
@@ -598,6 +599,7 @@ describe('profile schema', () => {
           requireMention: false,
           promptTemplate: '分析报警',
           cooldownMs: 1000,
+          settleMs: 60000,
         },
       ],
     });

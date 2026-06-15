@@ -191,12 +191,17 @@ Long-connection event consumption without a public domain:
         "requireMention": false,
         "replyInThread": true,
         "cooldownMs": 300000,
+        "settleMs": 60000,
         "promptTemplate": "This is an alert card from the group. Summarize the alert, assess impact, list likely causes, and suggest next debugging steps."
       }
     ]
   }
 }
 ```
+
+`settleMs` delays the auto-answer and refetches the same `message_id` before
+running the agent. This covers alert cards that are edited in place shortly
+after delivery, for example cards that later receive RCA or ACK content.
 
 HTTP Webhook:
 
@@ -226,6 +231,7 @@ HTTP Webhook:
         "requireMention": false,
         "replyInThread": true,
         "cooldownMs": 300000,
+        "settleMs": 60000,
         "promptTemplate": "This is an alert card from the group. Summarize the alert, assess impact, list likely causes, and suggest next debugging steps."
       }
     ]

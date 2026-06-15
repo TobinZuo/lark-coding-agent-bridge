@@ -3,6 +3,7 @@ import type { NormalizedMessage } from '@larksuite/channel';
 import {
   AutoAnswerRuntime,
   extractCardText,
+  isAlarmRuleRequestText,
   matchTriggerRule,
   normalizeIncomingMessage,
 } from '../../../src/bot/auto-answer';
@@ -71,6 +72,7 @@ describe('auto-answer bot rules', () => {
             cardMatchers: [{ path: '$text', operator: 'contains', value: '报警' }],
             agentProfile: 'codex',
             promptTemplate: '请分析报警',
+            settleMs: 60_000,
           },
         ],
       },
@@ -88,7 +90,19 @@ describe('auto-answer bot rules', () => {
     expect(skipped).toBeUndefined();
     expect(first?.message.content).toContain('请分析报警');
     expect(first?.message.mentionedBot).toBe(true);
+    expect(first?.rule.settleMs).toBe(60_000);
     expect(second).toBeUndefined();
+  });
+
+  it('only treats explicit alarm-card setup commands as rule requests', () => {
+    expect(isAlarmRuleRequestText('请配置这个群的告警卡片自动分析规则')).toBe(true);
+    expect(isAlarmRuleRequestText('/alarm-card-rule 告警卡片 自动分析')).toBe(true);
+    expect(isAlarmRuleRequestText('configure alarm card auto analysis rule')).toBe(true);
+
+    expect(isAlarmRuleRequestText('出现告警卡片你就在下方根据告警卡片分析问题原因')).toBe(false);
+    expect(isAlarmRuleRequestText('新的报警卡片出来，你好像没看到')).toBe(false);
+    expect(isAlarmRuleRequestText('我看出现了新卡片你也没有自动分析和回复啊')).toBe(false);
+    expect(isAlarmRuleRequestText('你怎么立刻就生成自动分析规则草案了。不对吧')).toBe(false);
   });
 });
 

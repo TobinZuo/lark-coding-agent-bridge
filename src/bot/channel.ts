@@ -1,4 +1,5 @@
 import type {
+  ApiMessageItem,
   LarkChannel,
   LarkChannelOptions,
   NormalizedMessage,
@@ -62,7 +63,12 @@ import { fetchQuotedContext, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
-import { AutoAnswerRuntime, autoAnswerMeta } from './auto-answer';
+import {
+  AutoAnswerRuntime,
+  autoAnswerMeta,
+  normalizeIncomingMessage,
+  normalizedMessageFromIncoming,
+} from './auto-answer';
 import { startWebhookListener, type WebhookListener } from './webhook-listener';
 import { startLarkEventConsumer, type LarkEventConsumer } from './event-consumer';
 
@@ -193,6 +199,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
   const autoAnswer = new AutoAnswerRuntime();
+  const autoSettleTimers = new Set<ReturnType<typeof setTimeout>>();
 
   // Resolve the App Secret to plaintext. The config field can be a literal
   // string, a "${VAR}" template, or a {source, id} SecretRef referencing
@@ -311,6 +318,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           executor,
           pool,
           autoAnswer,
+          autoSettleTimers,
         }),
       ).catch((err) => log.fail('intake', err));
     },
@@ -415,6 +423,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           executor,
           pool,
           autoAnswer,
+          autoSettleTimers,
           autoOnly: true,
         }),
       ).catch((err) => log.fail('webhook-intake', err));
@@ -441,6 +450,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           executor,
           pool,
           autoAnswer,
+          autoSettleTimers,
           autoOnly: true,
         }),
       ).catch((err) => log.fail('event-consumer-intake', err));
@@ -491,6 +501,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       keepalive.stop();
       await stopWebhookListener(webhookListener);
       await stopEventConsumer(eventConsumer);
+      for (const timer of autoSettleTimers) clearTimeout(timer);
+      autoSettleTimers.clear();
       pending.cancelAll();
       const [disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),
@@ -582,6 +594,7 @@ interface IntakeDeps {
   executor: RunExecutor;
   pool: ProcessPool;
   autoAnswer: AutoAnswerRuntime;
+  autoSettleTimers: Set<ReturnType<typeof setTimeout>>;
   autoOnly?: boolean;
 }
 
@@ -599,6 +612,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     executor,
     pool,
     autoAnswer,
+    autoSettleTimers,
     autoOnly,
   } = deps;
   let { msg } = deps;
@@ -614,6 +628,32 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
   if (autoMatch) {
+    const settleMs = autoMatch.rule.settleMs;
+    if (settleMs && settleMs > 0 && !isAutoSettledMessage(msg)) {
+      const ttlMs = settleMs + (autoMatch.rule.cooldownMs ?? controls.cfg.larkBot?.dedupeTtlMs ?? 10 * 60 * 1000);
+      if (!autoAnswer.tryRecordSettle(autoMatch.rule.id, msg.messageId, ttlMs)) {
+        log.info('intake', 'auto-settle-duplicate', {
+          chatId: msg.chatId,
+          msgId: msg.messageId,
+          ruleId: autoMatch.rule.id,
+        });
+        return;
+      }
+      scheduleAutoSettle({
+        deps,
+        msg,
+        settleMs,
+        timers: autoSettleTimers,
+        botOpenId: channel.botIdentity?.openId,
+      });
+      log.info('intake', 'auto-settle-scheduled', {
+        chatId: msg.chatId,
+        msgId: msg.messageId,
+        ruleId: autoMatch.rule.id,
+        settleMs,
+      });
+      return;
+    }
     if (!autoAnswer.tryRecordMessage(msg.messageId, controls.cfg.larkBot?.dedupeTtlMs)) {
       log.info('intake', 'auto-duplicate-message', { chatId: msg.chatId, msgId: msg.messageId });
       return;
@@ -707,6 +747,104 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
 
   const size = pending.push(scope, msg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+}
+
+function scheduleAutoSettle(input: {
+  deps: IntakeDeps;
+  msg: NormalizedMessage;
+  settleMs: number;
+  timers: Set<ReturnType<typeof setTimeout>>;
+  botOpenId?: string;
+}): void {
+  const timer = setTimeout(() => {
+    input.timers.delete(timer);
+    void withTrace({ chatId: input.msg.chatId, msgId: input.msg.messageId }, async () => {
+      const latest =
+        (await fetchLatestAutoMessage(input.deps.channel, input.msg, input.botOpenId)) ?? input.msg;
+      await intakeMessage({
+        ...input.deps,
+        msg: markAutoSettledMessage(latest),
+        autoOnly: true,
+      });
+    }).catch((err) => log.fail('auto-settle', err, { msgId: input.msg.messageId }));
+  }, input.settleMs);
+  input.timers.add(timer);
+}
+
+async function fetchLatestAutoMessage(
+  channel: LarkChannel,
+  original: NormalizedMessage,
+  botOpenId?: string,
+): Promise<NormalizedMessage | undefined> {
+  let items: ApiMessageItem[];
+  try {
+    items = await channel.fetchRawMessage(original.messageId, {
+      cardContentType: 'user_card_content',
+    });
+  } catch (err) {
+    log.warn('auto-settle', 'fetch-failed', {
+      messageId: original.messageId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+  const parent = items[0];
+  if (!parent?.message_id) return undefined;
+
+  const incoming = normalizeIncomingMessage({
+    event: {
+      sender: {
+        sender_id: { open_id: parent.sender?.id ?? original.senderId },
+        sender_type: senderTypeFromMessage(original) ?? 'app',
+      },
+      message: {
+        message_id: parent.message_id,
+        chat_id: original.chatId,
+        chat_type: original.chatType,
+        message_type: parent.msg_type ?? original.rawContentType ?? 'text',
+        content: parent.body?.content ?? original.content,
+        create_time: parent.create_time !== undefined
+          ? String(parent.create_time)
+          : stringFromUnknown((original as { createTime?: unknown }).createTime),
+        ...(original.threadId ? { thread_id: original.threadId } : {}),
+        ...((original as { rootId?: string }).rootId ? { root_id: (original as { rootId?: string }).rootId } : {}),
+        ...(original.replyToMessageId ? { parent_id: original.replyToMessageId } : {}),
+        ...(parent.mentions ? { mentions: parent.mentions } : {}),
+      },
+    },
+  }, botOpenId);
+  return incoming ? normalizedMessageFromIncoming(incoming, { botOpenId }) : undefined;
+}
+
+function isAutoSettledMessage(msg: NormalizedMessage): boolean {
+  const raw = msg.raw as { __larkAutoSettle?: { settled?: unknown } } | undefined;
+  return raw?.__larkAutoSettle?.settled === true;
+}
+
+function markAutoSettledMessage(msg: NormalizedMessage): NormalizedMessage {
+  return {
+    ...msg,
+    raw: {
+      ...(isRecord(msg.raw) ? msg.raw : {}),
+      __larkAutoSettle: { settled: true },
+    },
+  } as unknown as NormalizedMessage;
+}
+
+function senderTypeFromMessage(msg: NormalizedMessage): 'user' | 'app' | 'bot' | undefined {
+  const raw = msg.raw as { sender?: { sender_type?: unknown } } | undefined;
+  const value = raw?.sender?.sender_type;
+  return value === 'user' || value === 'app' || value === 'bot' ? value : undefined;
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 interface RunBatchDeps {

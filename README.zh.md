@@ -191,12 +191,16 @@ bridge 可以按显式规则自动把群消息交给本机 agent。默认不会�
         "requireMention": false,
         "replyInThread": true,
         "cooldownMs": 300000,
+        "settleMs": 60000,
         "promptTemplate": "这是一张群里的报警卡片。请概括告警、判断影响面、列出可能原因，并给出排查步骤。"
       }
     ]
   }
 }
 ```
+
+`settleMs` 会延迟自动分析，并在执行前重新拉取同一个 `message_id`
+的最新内容。它用于覆盖报警卡片发送后又原地更新 RCA、ACK 等内容的场景。
 
 HTTP Webhook：
 
@@ -226,6 +230,7 @@ HTTP Webhook：
         "requireMention": false,
         "replyInThread": true,
         "cooldownMs": 300000,
+        "settleMs": 60000,
         "promptTemplate": "这是一张群里的报警卡片。请概括告警、判断影响面、列出可能原因，并给出排查步骤。"
       }
     ]

@@ -300,6 +300,10 @@ function normalizeLarkBotRule(input: unknown): LarkBotTriggerRule | undefined {
     typeof raw.cooldownMs === 'number' && Number.isFinite(raw.cooldownMs) && raw.cooldownMs > 0
       ? Math.floor(raw.cooldownMs)
       : undefined;
+  const settleMs =
+    typeof raw.settleMs === 'number' && Number.isFinite(raw.settleMs) && raw.settleMs > 0
+      ? Math.floor(raw.settleMs)
+      : undefined;
   return {
     id: raw.id.trim(),
     ...(typeof raw.enabled === 'boolean' ? { enabled: raw.enabled } : {}),
@@ -314,6 +318,7 @@ function normalizeLarkBotRule(input: unknown): LarkBotTriggerRule | undefined {
     ...(typeof raw.promptTemplate === 'string' && raw.promptTemplate.trim() ? { promptTemplate: raw.promptTemplate.trim() } : {}),
     ...(typeof raw.replyInThread === 'boolean' ? { replyInThread: raw.replyInThread } : {}),
     ...(cooldownMs ? { cooldownMs } : {}),
+    ...(settleMs ? { settleMs } : {}),
   };
 }
 
