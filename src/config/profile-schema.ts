@@ -319,6 +319,10 @@ function normalizeAutoTrigger(input: unknown): AutoTriggerRule | undefined {
     ...nonEmptyArrayProp('contentIncludes', raw.contentIncludes),
     ...nonEmptyArrayProp('contentAnyIncludes', raw.contentAnyIncludes),
     ...(typeof raw.prompt === 'string' && raw.prompt.trim() ? { prompt: raw.prompt.trim() } : {}),
+    ...(typeof raw.polling === 'boolean' ? { polling: raw.polling } : {}),
+    ...boundedIntegerProp('pollIntervalSeconds', raw.pollIntervalSeconds, 5, 3600),
+    ...boundedIntegerProp('pollLookbackSeconds', raw.pollLookbackSeconds, 30, 3600),
+    ...boundedIntegerProp('pollPageSize', raw.pollPageSize, 1, 50),
   };
   const hasMatcher = Boolean(
     out.chatIds?.length ||
@@ -337,6 +341,18 @@ function nonEmptyArrayProp<K extends keyof AutoTriggerRule>(
 ): Pick<AutoTriggerRule, K> | Record<string, never> {
   const items = stringArray(value).map((item) => item.trim()).filter(Boolean);
   return items.length > 0 ? ({ [key]: items } as Pick<AutoTriggerRule, K>) : {};
+}
+
+function boundedIntegerProp<K extends keyof AutoTriggerRule>(
+  key: K,
+  value: unknown,
+  min: number,
+  max: number,
+): Pick<AutoTriggerRule, K> | Record<string, never> {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return {};
+  const n = Math.trunc(value);
+  if (n < min || n > max) return {};
+  return { [key]: n } as Pick<AutoTriggerRule, K>;
 }
 
 function normalizeLarkCli(input: unknown): LarkCliConfig {

@@ -110,6 +110,17 @@ export interface AutoTriggerRule {
   contentAnyIncludes?: string[];
   /** Instruction prepended to the triggering message before it is sent to the agent. */
   prompt?: string;
+  /**
+   * Actively poll recent chat history for matching messages. Use this when the
+   * platform does not deliver unmentioned bot/app messages to this bot.
+   */
+  polling?: boolean;
+  /** Polling cadence in seconds. Default 30; clamped to 5-3600. */
+  pollIntervalSeconds?: number;
+  /** How far back each poll scans in seconds. Default 180; clamped to 30-3600. */
+  pollLookbackSeconds?: number;
+  /** Number of recent messages to request per chat/rule. Default 20; clamped to 1-50. */
+  pollPageSize?: number;
 }
 
 export interface AppPreferences {

@@ -63,6 +63,7 @@ import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import { matchAutoTrigger, withAutoTriggerPrompt } from './auto-trigger';
+import { startAutoTriggerPoller } from './auto-trigger-poller';
 
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
@@ -381,6 +382,12 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   });
   await ownerRefresh.start();
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
+  const autoTriggerPoller = startAutoTriggerPoller({
+    channel,
+    controls,
+    pending,
+    chatModeCache,
+  });
 
   const identity = channel.botIdentity;
   // Late-bind the bot's own IM identity into the agent adapter so the system
@@ -420,6 +427,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       activeRuns.pauseNewRuns('bridge-disconnect');
       ownerRefresh.stop();
       knownChatsRefresh.stop();
+      autoTriggerPoller.stop();
       keepalive.stop();
       pending.cancelAll();
       const [disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([

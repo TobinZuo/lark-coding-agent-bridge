@@ -164,6 +164,8 @@ DMs do not require an @ mention. Groups and topic groups require `@bot` by defau
 
 Profiles can define `preferences.autoTriggers` for tightly scoped card workflows such as Argos alarm analysis. Auto triggers are evaluated after normal access control, so the group must still be in `access.allowedChats` (or the sender must be owner/admin). A matching rule may bypass the group `@bot` requirement for that one message only; ordinary group chatter remains quiet.
 
+If the platform does not deliver unmentioned bot/app messages to this bot, enable `polling` on the rule. Polling uses Feishu/Lark `im.v1.message.list` to scan recent messages in the configured `chatIds`, deduplicates by `message_id`, and replies to the original message/topic when a rule matches. The app must be in the group and must have permission to read all group messages.
+
 This is a profile-field snippet. Do not replace the whole `config.json`; edit the matching profile's `preferences` field.
 
 ```json
@@ -179,7 +181,11 @@ This is a profile-field snippet. Do not replace the whole `config.json`; edit th
         "rawContentTypes": ["interactive"],
         "contentIncludes": ["服务:", "报警时间:"],
         "contentAnyIncludes": ["Argos报警值守", "Service throws panic"],
-        "prompt": "请自动分析这条飞书告警卡片。只读排查报警原因，输出结论、影响窗口、证据链、当前状态和建议动作；不要自动 ACK、屏蔽或修改线上配置。"
+        "prompt": "请自动分析这条飞书告警卡片。只读排查报警原因，输出结论、影响窗口、证据链、当前状态和建议动作；不要自动 ACK、屏蔽或修改线上配置。",
+        "polling": true,
+        "pollIntervalSeconds": 30,
+        "pollLookbackSeconds": 180,
+        "pollPageSize": 20
       }
     ]
   }

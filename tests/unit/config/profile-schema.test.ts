@@ -132,6 +132,10 @@ describe('profile schema', () => {
             contentIncludes: ['服务:', '报警时间:'],
             contentAnyIncludes: ['Argos报警值守', 'Service throws panic'],
             prompt: ' 请自动分析 ',
+            polling: true,
+            pollIntervalSeconds: 10,
+            pollLookbackSeconds: 300,
+            pollPageSize: 30,
             ignored: 'field',
           },
           { name: 'no matcher' },
@@ -151,6 +155,10 @@ describe('profile schema', () => {
         contentIncludes: ['服务:', '报警时间:'],
         contentAnyIncludes: ['Argos报警值守', 'Service throws panic'],
         prompt: '请自动分析',
+        polling: true,
+        pollIntervalSeconds: 10,
+        pollLookbackSeconds: 300,
+        pollPageSize: 30,
       },
     ]);
   });
