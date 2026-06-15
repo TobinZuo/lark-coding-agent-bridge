@@ -718,7 +718,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       return;
     }
   }
-  const autoMatch = autoAnswer.matchMessage(controls.cfg, msg, channel.botIdentity?.openId, controls.profile);
+  const autoMatch = autoAnswer.matchMessage(controls.cfg, msg, channel.botIdentity?.openId, controls.profile, {
+    recordFingerprint: false,
+  });
   if (autoOnly && !autoMatch) {
     return;
   }
@@ -747,6 +749,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
         ruleId: autoMatch.rule.id,
         settleMs,
       });
+      return;
+    }
+    if (!autoAnswer.tryRecordFingerprint(autoMatch.rule, autoMatch.fingerprint, controls.cfg.larkBot?.dedupeTtlMs)) {
+      log.info('auto-answer', 'dedupe-fingerprint', { ruleId: autoMatch.rule.id, chatId: msg.chatId });
       return;
     }
     if (!autoAnswer.tryRecordMessage(msg.messageId, controls.cfg.larkBot?.dedupeTtlMs)) {

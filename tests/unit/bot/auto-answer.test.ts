@@ -135,6 +135,38 @@ describe('auto-answer bot rules', () => {
     expect(match?.rule.id).toBe('alarm-card');
   });
 
+  it('previews a rule match without consuming its fingerprint', () => {
+    const runtime = new AutoAnswerRuntime(() => 1000);
+    const cfg: AppConfig = {
+      accounts: { app },
+      larkBot: {
+        dedupeTtlMs: 60_000,
+        rules: [
+          {
+            id: 'alarm-card',
+            chatIds: ['oc_alarm'],
+            messageTypes: ['interactive'],
+            cardMatchers: [{ path: '$text', operator: 'contains', value: '报警' }],
+            promptTemplate: '请分析报警',
+            settleMs: 60_000,
+          },
+        ],
+      },
+    };
+    const normalized = normalizedMessage({
+      content: JSON.stringify({ body: { elements: [{ content: '数据库报警' }] } }),
+      rawContentType: 'interactive',
+    });
+
+    const preview = runtime.matchMessage(cfg, normalized, undefined, 'codex', { recordFingerprint: false });
+    const first = runtime.matchMessage(cfg, normalized, undefined, 'codex');
+    const second = runtime.matchMessage(cfg, normalized, undefined, 'codex');
+
+    expect(preview?.fingerprint).toBe(first?.fingerprint);
+    expect(first?.message.content).toContain('请分析报警');
+    expect(second).toBeUndefined();
+  });
+
   it('only treats explicit alarm-card setup commands as rule requests', () => {
     expect(isAlarmRuleRequestText('请配置这个群的告警卡片自动分析规则')).toBe(true);
     expect(isAlarmRuleRequestText('/alarm-card-rule 告警卡片 自动分析')).toBe(true);

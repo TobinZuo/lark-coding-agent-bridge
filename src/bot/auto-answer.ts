@@ -49,6 +49,10 @@ export interface RuleMatch {
   fingerprint: string;
 }
 
+interface MatchMessageOptions {
+  recordFingerprint?: boolean;
+}
+
 interface DraftRule {
   rule: LarkBotTriggerRule;
   createdAt: number;
@@ -159,6 +163,7 @@ export class AutoAnswerRuntime {
     msg: NormalizedMessage,
     botOpenId?: string,
     activeProfile?: string,
+    options: MatchMessageOptions = {},
   ): RuleMatch | undefined {
     const incoming = incomingFromNormalizedMessage(msg, botOpenId);
     if (!incoming) return undefined;
@@ -174,7 +179,10 @@ export class AutoAnswerRuntime {
       if (rule.agentProfile && activeProfile && rule.agentProfile !== activeProfile) continue;
       if (!matchTriggerRule(rule, incoming)) continue;
       const fingerprint = fingerprintFor(rule, incoming);
-      if (!this.tryRecord(`fingerprint:${fingerprint}`, rule.cooldownMs ?? cfg.larkBot?.dedupeTtlMs)) {
+      if (
+        options.recordFingerprint !== false &&
+        !this.tryRecordFingerprint(rule, fingerprint, cfg.larkBot?.dedupeTtlMs)
+      ) {
         log.info('auto-answer', 'dedupe-fingerprint', { ruleId: rule.id, chatId: incoming.chatId });
         return undefined;
       }
@@ -196,6 +204,10 @@ export class AutoAnswerRuntime {
 
   tryRecordSettle(ruleId: string, messageId: string, ttlMs?: number): boolean {
     return this.tryRecord(`settle:${ruleId}:${messageId}`, ttlMs);
+  }
+
+  tryRecordFingerprint(rule: LarkBotTriggerRule, fingerprint: string, ttlMs?: number): boolean {
+    return this.tryRecord(`fingerprint:${fingerprint}`, rule.cooldownMs ?? ttlMs);
   }
 
   private tryRecord(key: string, ttlMs = DEFAULT_DEDUPE_TTL_MS): boolean {
