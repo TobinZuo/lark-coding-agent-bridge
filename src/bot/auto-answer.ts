@@ -108,8 +108,8 @@ export class AutoAnswerRuntime {
         channel,
         msg,
         [
-          '当前 profile 没有启用外部监听规则配置 skill，所以不能创建自动监听规则。',
-          '请先配置 larkBot.rulePlanner.enabled=true 和 larkBot.rulePlanner.skill。',
+          '当前 profile 的监听规则 planner 不可用，所以不能创建自动监听规则。',
+          '请确认 larkBot.rulePlanner.enabled 没有被显式设为 false。',
         ].join('\n'),
       );
       return true;
@@ -128,7 +128,7 @@ export class AutoAnswerRuntime {
       await replyToMessage(
         channel,
         msg,
-        `外部监听规则配置 skill 未能生成有效草案：${err instanceof Error ? err.message : String(err)}`,
+        `监听规则 planner 未能生成有效草案：${err instanceof Error ? err.message : String(err)}`,
       );
       return true;
     }

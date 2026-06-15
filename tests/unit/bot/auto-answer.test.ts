@@ -206,7 +206,7 @@ describe('auto-answer bot rules', () => {
     }
   });
 
-  it('requires an external planner for listener configuration', async () => {
+  it('reports when the listener planner is unavailable', async () => {
     const cfg: AppConfig = {
       accounts: { app },
       larkBot: { admins: ['ou_admin'] },
@@ -231,7 +231,7 @@ describe('auto-answer bot rules', () => {
     expect(handled).toBe(true);
     expect(channel.send).toHaveBeenCalledWith(
       'oc_alarm',
-      { markdown: expect.stringContaining('larkBot.rulePlanner.skill') },
+      { markdown: expect.stringContaining('rulePlanner.enabled') },
       { replyTo: 'om_admin' },
     );
     expect(cfg.larkBot?.rules).toBeUndefined();

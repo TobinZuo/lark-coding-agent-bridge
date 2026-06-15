@@ -74,6 +74,7 @@ import { startWebhookListener, type WebhookListener } from './webhook-listener';
 import { startLarkMessagePoller, type LarkMessagePoller } from './message-poller';
 import {
   buildRulePlannerPrompt,
+  effectiveRulePlannerConfig,
   parseRulePlannerText,
   type RulePlannerDraft,
   type RulePlannerRequest,
@@ -592,21 +593,18 @@ interface IntakeDeps {
   autoOnly?: boolean;
 }
 
-function externalRulePlannerFor(deps: IntakeDeps): AutoRulePlanner | undefined {
-  const planner = deps.controls.cfg.larkBot?.rulePlanner;
-  if (planner?.enabled !== true) return undefined;
-  return (request) => runExternalRulePlanner({ ...deps, request });
+function rulePlannerFor(deps: IntakeDeps): AutoRulePlanner | undefined {
+  const planner = effectiveRulePlannerConfig(deps.controls.cfg.larkBot?.rulePlanner);
+  if (!planner) return undefined;
+  return (request) => runRulePlanner({ ...deps, request });
 }
 
-async function runExternalRulePlanner(input: IntakeDeps & {
+async function runRulePlanner(input: IntakeDeps & {
   request: RulePlannerRequest;
 }): Promise<RulePlannerDraft> {
   const { controls, request, sessions, workspaces, executor } = input;
-  const planner = controls.cfg.larkBot?.rulePlanner;
-  if (planner?.enabled !== true) throw new Error('larkBot.rulePlanner is not enabled');
-  if (!planner.skill && !planner.promptTemplate) {
-    throw new Error('larkBot.rulePlanner.skill is required');
-  }
+  const planner = effectiveRulePlannerConfig(controls.cfg.larkBot?.rulePlanner);
+  if (!planner) throw new Error('larkBot.rulePlanner is disabled');
 
   const prompt = buildRulePlannerPrompt(planner, request);
   const capability =
@@ -711,7 +709,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       channel,
       controls,
       msg,
-      planRule: externalRulePlannerFor(deps),
+      planRule: rulePlannerFor(deps),
     });
     if (configHandled) {
       log.info('intake', 'auto-config-command', { chatId: msg.chatId, msgId: msg.messageId });

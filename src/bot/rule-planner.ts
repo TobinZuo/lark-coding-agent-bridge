@@ -22,6 +22,8 @@ const MESSAGE_TYPES = new Set<LarkBotMessageType>([
 ]);
 const TEXT_MATCHER_TYPES = new Set(['contains', 'equals', 'regex']);
 const CARD_MATCHER_OPERATORS = new Set(['exists', 'equals', 'contains', 'regex']);
+const DEFAULT_PLANNER_TIMEOUT_MS = 120_000;
+const DEFAULT_PLANNER_MAX_OUTPUT_CHARS = 40_000;
 
 export interface RulePlannerRequest {
   instruction: string;
@@ -46,6 +48,18 @@ export type RulePlannerValidationResult =
   | { ok: true; draft: RulePlannerDraft }
   | { ok: false; error: string };
 
+export function effectiveRulePlannerConfig(
+  input: LarkBotRulePlannerConfig | undefined,
+): LarkBotRulePlannerConfig | undefined {
+  if (input?.enabled === false) return undefined;
+  return {
+    ...(input ?? {}),
+    enabled: true,
+    timeoutMs: input?.timeoutMs ?? DEFAULT_PLANNER_TIMEOUT_MS,
+    maxOutputChars: input?.maxOutputChars ?? DEFAULT_PLANNER_MAX_OUTPUT_CHARS,
+  };
+}
+
 export function buildRulePlannerPrompt(
   planner: LarkBotRulePlannerConfig,
   request: RulePlannerRequest,
@@ -54,10 +68,10 @@ export function buildRulePlannerPrompt(
     return interpolatePlannerPrompt(planner.promptTemplate, request, planner.skill);
   }
   const skillLine = planner.skill
-    ? `必须使用外部 skill "${planner.skill}" 来理解管理员意图并生成草案。`
-    : '没有配置外部 skill 名称时，不要臆测规则；返回 rejected。';
+    ? `优先使用外部 skill "${planner.skill}" 来理解管理员意图并生成草案。`
+    : '使用本提示内置的规则规划能力来理解管理员意图并生成草案。';
   return [
-    '你是 Lark 群消息监听任务的外部规则配置 skill runner。',
+    '你是 Lark 群消息监听任务的规则配置 planner。',
     skillLine,
     '你的唯一任务是把管理员的自然语言监听需求转换成严格 JSON。不要解释，不要输出 Markdown，不要写代码块。',
     '',

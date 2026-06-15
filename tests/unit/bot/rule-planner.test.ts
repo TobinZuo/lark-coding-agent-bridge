@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildRulePlannerPrompt,
+  effectiveRulePlannerConfig,
   parseRulePlannerText,
 } from '../../../src/bot/rule-planner';
 
@@ -13,7 +14,25 @@ const request = {
   profile: 'codex',
 };
 
-describe('external auto-answer rule planner', () => {
+describe('auto-answer rule planner', () => {
+  it('enables the built-in planner by default', () => {
+    expect(effectiveRulePlannerConfig(undefined)).toMatchObject({
+      enabled: true,
+      timeoutMs: 120000,
+      maxOutputChars: 40000,
+    });
+    expect(effectiveRulePlannerConfig({ enabled: false })).toBeUndefined();
+  });
+
+  it('builds a default prompt without requiring a configured skill', () => {
+    const prompt = buildRulePlannerPrompt(effectiveRulePlannerConfig(undefined)!, request);
+
+    expect(prompt).toContain('内置的规则规划能力');
+    expect(prompt).toContain('当前 chatId: oc_current');
+    expect(prompt).toContain(request.instruction);
+    expect(prompt).toContain('"promptTemplate"');
+  });
+
   it('builds a prompt that delegates planning to the configured skill', () => {
     const prompt = buildRulePlannerPrompt({
       enabled: true,
