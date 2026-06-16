@@ -1,6 +1,7 @@
 import type {
   AppCredentials,
   LarkBotConfig,
+  LarkBotFingerprintConfig,
   LarkBotMessageType,
   LarkBotTriggerRule,
   AppPreferences,
@@ -337,6 +338,7 @@ function normalizeLarkBotRule(input: unknown): LarkBotTriggerRule | undefined {
     typeof raw.settleMs === 'number' && Number.isFinite(raw.settleMs) && raw.settleMs > 0
       ? Math.floor(raw.settleMs)
       : undefined;
+  const fingerprint = normalizeLarkBotFingerprint(raw.fingerprint);
   return {
     id: raw.id.trim(),
     ...(typeof raw.enabled === 'boolean' ? { enabled: raw.enabled } : {}),
@@ -351,7 +353,20 @@ function normalizeLarkBotRule(input: unknown): LarkBotTriggerRule | undefined {
     ...(typeof raw.promptTemplate === 'string' && raw.promptTemplate.trim() ? { promptTemplate: raw.promptTemplate.trim() } : {}),
     ...(typeof raw.replyInThread === 'boolean' ? { replyInThread: raw.replyInThread } : {}),
     ...(cooldownMs ? { cooldownMs } : {}),
+    ...(fingerprint ? { fingerprint } : {}),
     ...(settleMs ? { settleMs } : {}),
+  };
+}
+
+function normalizeLarkBotFingerprint(input: unknown): LarkBotFingerprintConfig | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const raw = input as LarkBotFingerprintConfig;
+  const mode = ['full', 'paths'].includes(String(raw.mode)) ? raw.mode : undefined;
+  const paths = stringArray(raw.paths).filter(Boolean);
+  if (!mode && paths.length === 0) return undefined;
+  return {
+    ...(mode ? { mode } : {}),
+    ...(paths.length > 0 ? { paths } : {}),
   };
 }
 

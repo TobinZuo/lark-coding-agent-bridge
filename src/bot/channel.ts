@@ -597,8 +597,34 @@ async function sendAutoDuplicateNotice(
   };
   try {
     await channel.send(msg.chatId, { markdown: text }, sendOpts);
-  } catch {
-    await channel.send(msg.chatId, { markdown: text });
+    log.info('auto-answer', 'duplicate-notice-sent', {
+      chatId: msg.chatId,
+      messageId: msg.messageId,
+      ruleId: match.rule.id,
+      replyInThread: sendOpts.replyInThread === true,
+    });
+  } catch (err) {
+    log.warn('auto-answer', 'duplicate-notice-thread-send-failed', {
+      chatId: msg.chatId,
+      messageId: msg.messageId,
+      ruleId: match.rule.id,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    try {
+      await channel.send(msg.chatId, { markdown: text }, { replyTo: msg.messageId });
+      log.info('auto-answer', 'duplicate-notice-fallback-sent', {
+        chatId: msg.chatId,
+        messageId: msg.messageId,
+        ruleId: match.rule.id,
+      });
+    } catch (fallbackErr) {
+      log.fail('auto-answer', fallbackErr, {
+        step: 'duplicate-notice-send',
+        chatId: msg.chatId,
+        messageId: msg.messageId,
+        ruleId: match.rule.id,
+      });
+    }
   }
 }
 

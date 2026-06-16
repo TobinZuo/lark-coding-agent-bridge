@@ -5,6 +5,7 @@ import type {
   AppConfig,
   LarkBotCardMatcher,
   LarkBotConfig,
+  LarkBotFingerprintConfig,
   LarkBotTextMatcher,
   LarkBotTriggerRule,
 } from '../config/schema';
@@ -687,6 +688,17 @@ function valueAtPath(input: unknown, path = ''): unknown {
 }
 
 function fingerprintFor(rule: LarkBotTriggerRule, msg: IncomingMessage): string {
+  const mode = rule.fingerprint?.mode ?? (rule.fingerprint?.paths?.length ? 'paths' : 'full');
+  if (mode === 'paths') {
+    const pathInput = pathsFingerprintInput(rule, msg, rule.fingerprint);
+    if (pathInput.hasValue) {
+      return shortHash(JSON.stringify(pathInput.input), 24);
+    }
+  }
+  return legacyFingerprintFor(rule, msg);
+}
+
+function legacyFingerprintFor(rule: LarkBotTriggerRule, msg: IncomingMessage): string {
   return shortHash(
     JSON.stringify({
       rule: rule.id,
@@ -697,6 +709,108 @@ function fingerprintFor(rule: LarkBotTriggerRule, msg: IncomingMessage): string 
     }),
     24,
   );
+}
+
+function pathsFingerprintInput(
+  rule: LarkBotTriggerRule,
+  msg: IncomingMessage,
+  config?: LarkBotFingerprintConfig,
+): { input: Record<string, unknown>; hasValue: boolean } {
+  const values: Record<string, unknown> = {};
+  let hasValue = false;
+  for (const path of config?.paths ?? []) {
+    const value = fingerprintPathValue(msg, path);
+    values[path] = value;
+    hasValue ||= hasFingerprintValue(value);
+  }
+  return {
+    input: {
+      rule: rule.id,
+      chat: msg.chatId,
+      type: msg.messageType,
+      paths: values,
+    },
+    hasValue,
+  };
+}
+
+function fingerprintPathValue(msg: IncomingMessage, path: string): unknown {
+  if (path === '$text') return normalizeFingerprintText(msg.plainText);
+  if (path === '$templateId') return msg.cardJson ? cardTemplateId(msg.cardJson) : undefined;
+  if (path.startsWith('$line:')) return extractFingerprintLineValue(msg.plainText, path.slice('$line:'.length));
+  return normalizeFingerprintValue(valueAtPath(msg.cardJson ?? msg.rawContent, path));
+}
+
+function extractFingerprintLineValue(text: string, label: string): string | undefined {
+  const cleanLabel = label.trim();
+  if (!cleanLabel) return undefined;
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]?.trim() ?? '';
+    const inline = extractInlineLabelValue(line, cleanLabel);
+    if (inline !== undefined) return normalizeFingerprintLineValue(inline);
+    if (isStandaloneLabelLine(line, cleanLabel)) {
+      const next = lines.slice(i + 1).map((item) => item.trim()).find(Boolean);
+      if (next) return normalizeFingerprintLineValue(next);
+    }
+  }
+  return undefined;
+}
+
+function extractInlineLabelValue(line: string, label: string): string | undefined {
+  const separator = line.indexOf(':') >= 0 ? ':' : line.indexOf('：') >= 0 ? '：' : '';
+  if (!separator) return undefined;
+  const [rawKey, ...rest] = line.split(separator);
+  if ((rawKey ?? '').trim() !== label) return undefined;
+  return rest.join(separator).trim();
+}
+
+function isStandaloneLabelLine(line: string, label: string): boolean {
+  const normalized = line.replace(/[：:]\s*$/, '').trim();
+  return normalized === label;
+}
+
+function normalizeFingerprintLineValue(value: string): string {
+  return normalizeFingerprintText(
+    value
+      .replace(/\[([^\]]+)\]\((?:https?|lark):\/\/[^)\s]+\)/g, '$1')
+      .replace(/\]\((?:https?|lark):\/\/[^)\s]+\)/g, '')
+      .replace(/^\[\[/, '[')
+      .replace(/(?:https?|lark):\/\/\S+/g, '')
+      .trim(),
+  );
+}
+
+function normalizeFingerprintValue(value: unknown): unknown {
+  if (typeof value === 'string') return normalizeFingerprintText(value);
+  if (Array.isArray(value)) return value.map(normalizeFingerprintValue);
+  if (isRecord(value)) {
+    return Object.keys(value).sort().reduce<Record<string, unknown>>((acc, key) => {
+      acc[key] = normalizeFingerprintValue(value[key]);
+      return acc;
+    }, {});
+  }
+  return value;
+}
+
+function hasFingerprintValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some(hasFingerprintValue);
+  if (isRecord(value)) return Object.values(value).some(hasFingerprintValue);
+  return true;
+}
+
+function cardTemplateId(card: unknown): string | undefined {
+  return [
+    valueAtPath(card, 'data.template_id'),
+    valueAtPath(card, 'template_id'),
+    valueAtPath(card, 'card.template_id'),
+  ].map(stringValue).find(Boolean);
+}
+
+function normalizeFingerprintText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 function isStale(msg: IncomingMessage, maxAgeMs: number, now: number): boolean {

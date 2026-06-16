@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type {
   LarkBotCardMatcher,
+  LarkBotFingerprintConfig,
   LarkBotMessageType,
   LarkBotPollerConfig,
   LarkBotRulePlannerConfig,
@@ -96,6 +97,7 @@ export function buildRulePlannerPrompt(
     '    "promptTemplate": "执行时注入给 agent 的完整 prompt，必须保留管理员目标并改写成针对命中消息的执行任务",',
     '    "replyInThread": true,',
     '    "cooldownMs": 300000,',
+    '    "fingerprint": { "mode": "paths", "paths": ["$line:服务", "$line:集群", "$line:规则"] },',
     '    "settleMs": 60000',
     '  },',
     '  "poller": {',
@@ -157,6 +159,7 @@ export function normalizeRulePlannerOutput(
   const cardMatchers = normalizeCardMatchers(rawRule.cardMatchers);
   const templateIds = stringArray(rawRule.templateIds);
   const senderIds = stringArray(rawRule.senderIds);
+  const fingerprint = normalizeFingerprint(rawRule.fingerprint);
   const hasMatcher = textMatchers.length > 0 || cardMatchers.length > 0 || templateIds.length > 0 || senderIds.length > 0;
   if (messageTypes.length === 0 && !hasMatcher) {
     return { ok: false, error: 'rule must include messageTypes or matchers' };
@@ -183,6 +186,7 @@ export function normalizeRulePlannerOutput(
     promptTemplate,
     ...(typeof rawRule.replyInThread === 'boolean' ? { replyInThread: rawRule.replyInThread } : {}),
     ...(positiveInt(rawRule.cooldownMs, 1, 24 * 60 * 60 * 1000) ? { cooldownMs: positiveInt(rawRule.cooldownMs, 1, 24 * 60 * 60 * 1000) } : {}),
+    ...(fingerprint ? { fingerprint } : {}),
     ...(positiveInt(rawRule.settleMs, 1, 10 * 60 * 1000) ? { settleMs: positiveInt(rawRule.settleMs, 1, 10 * 60 * 1000) } : {}),
   };
 
@@ -340,6 +344,18 @@ function positiveInt(input: unknown, min: number, max: number): number | undefin
 function stringArray(input: unknown): string[] {
   if (!Array.isArray(input)) return [];
   return [...new Set(input.map(stringValue).map((value) => value.trim()).filter(Boolean))];
+}
+
+function normalizeFingerprint(input: unknown): LarkBotFingerprintConfig | undefined {
+  if (!isRecord(input)) return undefined;
+  const rawMode = stringValue(input.mode);
+  const mode = rawMode === 'full' || rawMode === 'paths' ? rawMode : undefined;
+  const paths = stringArray(input.paths);
+  if (!mode && paths.length === 0) return undefined;
+  return {
+    ...(mode ? { mode } : {}),
+    ...(paths.length > 0 ? { paths } : {}),
+  };
 }
 
 function firstJsonObject(text: string): string | undefined {

@@ -136,6 +136,13 @@ export interface LarkBotCardMatcher {
   caseSensitive?: boolean;
 }
 
+export interface LarkBotFingerprintConfig {
+  /** Default/legacy: full card JSON or raw content. */
+  mode?: 'full' | 'paths';
+  /** JSON paths used when mode is "paths". Special paths: $text, $templateId, $line:<label>. */
+  paths?: string[];
+}
+
 export interface LarkBotTriggerRule {
   id: string;
   enabled?: boolean;
@@ -150,6 +157,7 @@ export interface LarkBotTriggerRule {
   promptTemplate?: string;
   replyInThread?: boolean;
   cooldownMs?: number;
+  fingerprint?: LarkBotFingerprintConfig;
   /** Wait before handling a matched message, then refetch the same message_id.
    * Useful for cards that are updated in place shortly after delivery. */
   settleMs?: number;

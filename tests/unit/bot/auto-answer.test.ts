@@ -219,6 +219,207 @@ describe('auto-answer bot rules', () => {
     });
   });
 
+  it('fingerprints interactive cards by configured paths instead of volatile card JSON', () => {
+    let now = 1000;
+    const runtime = new AutoAnswerRuntime(() => now);
+    const cfg: AppConfig = {
+      accounts: { app },
+      larkBot: {
+        dedupeTtlMs: 60_000,
+        rules: [
+          {
+            id: 'alarm-card',
+            chatIds: ['oc_alarm'],
+            messageTypes: ['interactive'],
+            templateIds: ['tpl_alarm'],
+            cardMatchers: [{ path: '$text', operator: 'contains', value: '报警' }],
+            cooldownMs: 300_000,
+            fingerprint: { mode: 'paths', paths: ['$templateId', '$text'] },
+          },
+        ],
+      },
+    };
+    const firstMsg = normalizedMessage({
+      content: JSON.stringify({
+        data: { template_id: 'tpl_alarm' },
+        body: { elements: [{ tag: 'markdown', content: '数据库报警' }] },
+        volatile: { updated_at: 1000, trace: 'a' },
+      }),
+      rawContentType: 'interactive',
+    });
+    const duplicateMsg = {
+      ...normalizedMessage({
+        content: JSON.stringify({
+          data: { template_id: 'tpl_alarm' },
+          body: { elements: [{ tag: 'markdown', content: '数据库报警' }] },
+          volatile: { updated_at: 2000, trace: 'b' },
+        }),
+        rawContentType: 'interactive',
+      }),
+      messageId: 'om_alarm_dup',
+    } as NormalizedMessage;
+
+    const firstMatch = runtime.matchMessage(cfg, firstMsg, undefined, undefined, { recordFingerprint: false });
+    const duplicateMatch = runtime.matchMessage(cfg, duplicateMsg, undefined, undefined, { recordFingerprint: false });
+    if (!firstMatch || !duplicateMatch) throw new Error('expected matches');
+
+    const first = runtime.tryRecordFingerprint(firstMatch.rule, firstMatch.fingerprint, firstMsg, cfg.larkBot?.dedupeTtlMs);
+    now = 11_000;
+    const duplicate = runtime.tryRecordFingerprint(
+      duplicateMatch.rule,
+      duplicateMatch.fingerprint,
+      duplicateMsg,
+      cfg.larkBot?.dedupeTtlMs,
+    );
+
+    expect(duplicateMatch.fingerprint).toBe(firstMatch.fingerprint);
+    expect(first.ok).toBe(true);
+    expect(duplicate.ok).toBe(false);
+    expect(duplicate.record.lastMessageId).toBe('om_alarm_dup');
+  });
+
+  it('supports path-based card fingerprints', () => {
+    const runtime = new AutoAnswerRuntime(() => 1000);
+    const cfg: AppConfig = {
+      accounts: { app },
+      larkBot: {
+        rules: [
+          {
+            id: 'alarm-card',
+            chatIds: ['oc_alarm'],
+            messageTypes: ['interactive'],
+            cardMatchers: [{ path: '$text', operator: 'contains', value: '报警' }],
+            fingerprint: { mode: 'paths', paths: ['$templateId', '$text'] },
+          },
+        ],
+      },
+    };
+    const firstMsg = normalizedMessage({
+      content: JSON.stringify({
+        data: { template_id: 'tpl_alarm' },
+        body: { elements: [{ tag: 'markdown', content: '数据库报警' }] },
+        volatile: { trace: 'a' },
+      }),
+      rawContentType: 'interactive',
+    });
+    const duplicateMsg = normalizedMessage({
+      content: JSON.stringify({
+        data: { template_id: 'tpl_alarm' },
+        body: { elements: [{ tag: 'markdown', content: '数据库报警' }] },
+        volatile: { trace: 'b' },
+      }),
+      rawContentType: 'interactive',
+    });
+
+    const firstMatch = runtime.matchMessage(cfg, firstMsg, undefined, undefined, { recordFingerprint: false });
+    const duplicateMatch = runtime.matchMessage(cfg, duplicateMsg, undefined, undefined, { recordFingerprint: false });
+
+    expect(duplicateMatch?.fingerprint).toBe(firstMatch?.fingerprint);
+  });
+
+  it('fingerprints alert cards by stable labeled text lines', () => {
+    const runtime = new AutoAnswerRuntime(() => 1000);
+    const cfg: AppConfig = {
+      accounts: { app },
+      larkBot: {
+        rules: [
+          {
+            id: 'alarm-card',
+            chatIds: ['oc_alarm'],
+            messageTypes: ['interactive'],
+            cardMatchers: [{ path: '$text', operator: 'contains', value: 'ignored' }],
+            fingerprint: { mode: 'paths', paths: ['$line:服务', '$line:集群', '$line:规则'] },
+          },
+        ],
+      },
+    };
+    const firstMsg = normalizedMessage({
+      content: JSON.stringify({
+        data: { template_id: 'tpl_alarm' },
+        body: { elements: [{ tag: 'markdown', content: 'ignored' }] },
+        volatile: { trace: 'a' },
+      }),
+      rawContentType: 'interactive',
+      text: [
+        '[warning] [argos inject] go service panic log',
+        '服务: data.ecom.aigc_gateway',
+        '集群: Singapore-Central: default',
+        '规则: [[argos inject] go service panic log](https://open.example/rule?rule_id=70369296138915&send_item_id=a)',
+        '报警时间: 2026-06-16 03:19:05',
+        'q: 0.0333',
+      ].join('\n'),
+    });
+    const duplicateMsg = normalizedMessage({
+      content: JSON.stringify({
+        data: { template_id: 'tpl_alarm' },
+        body: { elements: [{ tag: 'markdown', content: 'ignored' }] },
+        volatile: { trace: 'b' },
+      }),
+      rawContentType: 'interactive',
+      text: [
+        '[已恢复][warning] [argos inject] go service panic log',
+        '服务: data.ecom.aigc_gateway',
+        '集群: Singapore-Central: default',
+        '规则: [[argos inject] go service panic log](https://open.example/rule?rule_id=70369296138915&send_item_id=b)',
+        '报警时间: 2026-06-16 03:22:05',
+        'q: 0.0666',
+      ].join('\n'),
+    });
+    const differentRuleMsg = normalizedMessage({
+      content: JSON.stringify({
+        data: { template_id: 'tpl_alarm' },
+        body: { elements: [{ tag: 'markdown', content: 'ignored' }] },
+      }),
+      rawContentType: 'interactive',
+      text: [
+        '[warning] [MS inject]Service throws panic',
+        '服务: data.ecom.aigc_gateway',
+        '集群: Singapore-Central: default',
+        '规则: [[MS inject]Service throws panic](https://open.example/rule?rule_id=70369296138916)',
+      ].join('\n'),
+    });
+
+    const firstMatch = runtime.matchMessage(cfg, firstMsg, undefined, undefined, { recordFingerprint: false });
+    const duplicateMatch = runtime.matchMessage(cfg, duplicateMsg, undefined, undefined, { recordFingerprint: false });
+    const differentRuleMatch = runtime.matchMessage(cfg, differentRuleMsg, undefined, undefined, { recordFingerprint: false });
+
+    expect(duplicateMatch?.fingerprint).toBe(firstMatch?.fingerprint);
+    expect(differentRuleMatch?.fingerprint).not.toBe(firstMatch?.fingerprint);
+  });
+
+  it('falls back to full fingerprints when configured paths are absent', () => {
+    const runtime = new AutoAnswerRuntime(() => 1000);
+    const cfg: AppConfig = {
+      accounts: { app },
+      larkBot: {
+        rules: [
+          {
+            id: 'alarm-card',
+            chatIds: ['oc_alarm'],
+            messageTypes: ['interactive'],
+            cardMatchers: [{ path: '$text', operator: 'contains', value: 'ignored' }],
+            fingerprint: { mode: 'paths', paths: ['$line:服务', '$line:集群', '$line:规则'] },
+          },
+        ],
+      },
+    };
+    const firstMsg = normalizedMessage({
+      content: JSON.stringify({ body: { elements: [{ tag: 'markdown', content: 'ignored' }] }, trace: 'a' }),
+      rawContentType: 'interactive',
+      text: '没有稳定标签的卡片 A',
+    });
+    const secondMsg = normalizedMessage({
+      content: JSON.stringify({ body: { elements: [{ tag: 'markdown', content: 'ignored' }] }, trace: 'b' }),
+      rawContentType: 'interactive',
+      text: '没有稳定标签的卡片 B',
+    });
+
+    const firstMatch = runtime.matchMessage(cfg, firstMsg, undefined, undefined, { recordFingerprint: false });
+    const secondMatch = runtime.matchMessage(cfg, secondMsg, undefined, undefined, { recordFingerprint: false });
+
+    expect(secondMatch?.fingerprint).not.toBe(firstMatch?.fingerprint);
+  });
+
   it('only treats explicit alarm-card setup commands as rule requests', () => {
     expect(isAlarmRuleRequestText('请配置这个群的告警卡片自动分析规则')).toBe(false);
     expect(isAlarmRuleRequestText('/alarm-card-rule 告警卡片 自动分析')).toBe(true);
@@ -475,13 +676,14 @@ function messagePayload(input: { content: unknown }): unknown {
 function normalizedMessage(input: {
   content: string;
   rawContentType: string;
+  text?: string;
 }): NormalizedMessage {
   return {
     messageId: 'om_alarm',
     chatId: 'oc_alarm',
     chatType: 'group',
     senderId: 'ou_alert_bot',
-    content: '数据库报警',
+    content: input.text ?? '数据库报警',
     rawContentType: input.rawContentType,
     resources: [],
     mentionedBot: false,

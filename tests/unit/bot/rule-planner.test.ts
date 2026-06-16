@@ -31,6 +31,7 @@ describe('auto-answer rule planner', () => {
     expect(prompt).toContain('当前 chatId: oc_current');
     expect(prompt).toContain(request.instruction);
     expect(prompt).toContain('"promptTemplate"');
+    expect(prompt).toContain('"fingerprint"');
   });
 
   it('builds a prompt that delegates planning to the configured skill', () => {
@@ -43,6 +44,7 @@ describe('auto-answer rule planner', () => {
     expect(prompt).toContain('当前 chatId: oc_current');
     expect(prompt).toContain(request.instruction);
     expect(prompt).toContain('"promptTemplate"');
+    expect(prompt).toContain('"fingerprint"');
   });
 
   it('parses and sanitizes a planner JSON draft', () => {
@@ -58,6 +60,7 @@ describe('auto-answer rule planner', () => {
             promptTemplate: 'Use foo-debug skill. Analyze the matched card only.',
             replyInThread: true,
             cooldownMs: 300000,
+            fingerprint: { mode: 'paths', paths: ['$line:服务', '$line:集群', '$line:规则'] },
             settleMs: 60000,
           },
           poller: {
@@ -81,6 +84,7 @@ describe('auto-answer rule planner', () => {
       chatIds: ['oc_current'],
       messageTypes: ['interactive'],
       replyInThread: true,
+      fingerprint: { mode: 'paths', paths: ['$line:服务', '$line:集群', '$line:规则'] },
     });
     expect(result.draft.rule.id).toMatch(/^payment-card-[0-9a-f]{12}$/);
     expect(result.draft.poller).toMatchObject({

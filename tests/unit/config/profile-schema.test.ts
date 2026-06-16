@@ -579,6 +579,7 @@ describe('profile schema', () => {
             requireMention: false,
             promptTemplate: '分析报警',
             cooldownMs: 1000,
+            fingerprint: { mode: 'paths', paths: ['$line:服务', '$line:集群', '$line:规则'] },
             settleMs: 60000,
           },
           {
@@ -621,6 +622,7 @@ describe('profile schema', () => {
           requireMention: false,
           promptTemplate: '分析报警',
           cooldownMs: 1000,
+          fingerprint: { mode: 'paths', paths: ['$line:服务', '$line:集群', '$line:规则'] },
           settleMs: 60000,
         },
       ],
