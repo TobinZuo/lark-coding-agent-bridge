@@ -168,6 +168,18 @@ describe('auto-answer bot rules', () => {
     expect(second).toBeUndefined();
   });
 
+  it('dedupes ingress separately from processing records', () => {
+    let now = 1000;
+    const runtime = new AutoAnswerRuntime(() => now);
+
+    expect(runtime.tryRecordIngress('om_alarm', 60_000)).toBe(true);
+    expect(runtime.tryRecordIngress('om_alarm', 60_000)).toBe(false);
+    expect(runtime.tryRecordMessage('om_alarm', 60_000)).toBe(true);
+
+    now = 62_000;
+    expect(runtime.tryRecordIngress('om_alarm', 60_000)).toBe(true);
+  });
+
   it('keeps metadata for duplicate fingerprint hits', () => {
     let now = 1000;
     const runtime = new AutoAnswerRuntime(() => now);
@@ -376,6 +388,70 @@ describe('auto-answer bot rules', () => {
         '服务: data.ecom.aigc_gateway',
         '集群: Singapore-Central: default',
         '规则: [[MS inject]Service throws panic](https://open.example/rule?rule_id=70369296138916)',
+      ].join('\n'),
+    });
+
+    const firstMatch = runtime.matchMessage(cfg, firstMsg, undefined, undefined, { recordFingerprint: false });
+    const duplicateMatch = runtime.matchMessage(cfg, duplicateMsg, undefined, undefined, { recordFingerprint: false });
+    const differentRuleMatch = runtime.matchMessage(cfg, differentRuleMsg, undefined, undefined, { recordFingerprint: false });
+
+    expect(duplicateMatch?.fingerprint).toBe(firstMatch?.fingerprint);
+    expect(differentRuleMatch?.fingerprint).not.toBe(firstMatch?.fingerprint);
+  });
+
+  it('fingerprints lark markdown labeled alert cards by configured profile paths', () => {
+    const runtime = new AutoAnswerRuntime(() => 1000);
+    const cfg: AppConfig = {
+      accounts: { app },
+      larkBot: {
+        rules: [
+          {
+            id: 'alarm-card',
+            chatIds: ['oc_alarm'],
+            messageTypes: ['interactive'],
+            cardMatchers: [{ path: '$text', operator: 'contains', value: 'ignored' }],
+            fingerprint: { mode: 'paths', paths: ['$line:服务', '$line:集群', '$line:规则'] },
+          },
+        ],
+      },
+    };
+    const firstMsg = normalizedMessage({
+      content: JSON.stringify({
+        body: { elements: [{ tag: 'markdown', content: 'ignored' }] },
+        trace: 'a',
+      }),
+      rawContentType: 'interactive',
+      text: [
+        '<font color=\'grey\'>服务:</font> data.ecom.aigc_gateway',
+        '<font color=\'grey\'>集群:</font> Singapore-Central: default',
+        '<font color=\'grey\'>规则:</font> [MS inject]Service throws panic [[查看规则配置]](https://cloud.example/argos/alarm/detail?rule_id=70369296138916&send_item_id=a)',
+        '<font color=\'grey\'>报警时间:</font> 2026-06-15 07:43:29 (UTC+0)',
+        '<font color=\'grey\'>q:</font> 0.0333',
+      ].join('\n'),
+    });
+    const duplicateMsg = normalizedMessage({
+      content: JSON.stringify({
+        body: { elements: [{ tag: 'markdown', content: 'ignored' }] },
+        trace: 'b',
+      }),
+      rawContentType: 'interactive',
+      text: [
+        '<font color=\'grey\'>服务:</font> data.ecom.aigc_gateway',
+        '<font color=\'grey\'>集群:</font> Singapore-Central: default',
+        '<font color=\'grey\'>规则:</font> [MS inject]Service throws panic [[查看规则配置]](https://cloud.example/argos/alarm/detail?rule_id=70369296138916&send_item_id=b)',
+        '<font color=\'grey\'>报警时间:</font> 2026-06-15 07:46:29 (UTC+0)',
+        '<font color=\'grey\'>q:</font> 0.0666',
+      ].join('\n'),
+    });
+    const differentRuleMsg = normalizedMessage({
+      content: JSON.stringify({
+        body: { elements: [{ tag: 'markdown', content: 'ignored' }] },
+      }),
+      rawContentType: 'interactive',
+      text: [
+        '<font color=\'grey\'>服务:</font> data.ecom.aigc_gateway',
+        '<font color=\'grey\'>集群:</font> Singapore-Central: default',
+        '<font color=\'grey\'>规则:</font> [Other inject]Service throws panic [[查看规则配置]](https://cloud.example/argos/alarm/detail?rule_id=70369296138917)',
       ].join('\n'),
     });
 

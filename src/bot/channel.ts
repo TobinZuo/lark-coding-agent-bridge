@@ -89,6 +89,7 @@ const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
 const FINAL_STREAM_UPDATE_ATTEMPTS = 3;
 const FINAL_STREAM_UPDATE_RETRY_MS = 250;
+const MANAGED_MARKDOWN_UPDATE_THROTTLE_MS = 400;
 const FINAL_MARKDOWN_CARD_ELEMENT_CHARS = 25_000;
 const FINAL_MARKDOWN_SUMMARY_CHARS = 160;
 const REACTION_CLEANUP_GRACE_MS = 1000;
@@ -806,6 +807,19 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
   if (autoMatch) {
+    const defaultAutoDedupeTtlMs = controls.cfg.larkBot?.dedupeTtlMs ?? 10 * 60 * 1000;
+    const ingressDedupeTtlMs = Math.max(
+      (autoMatch.rule.settleMs ?? 0) + (autoMatch.rule.cooldownMs ?? defaultAutoDedupeTtlMs),
+      defaultAutoDedupeTtlMs,
+    );
+    if (!isAutoSettledMessage(msg) && !autoAnswer.tryRecordIngress(msg.messageId, ingressDedupeTtlMs)) {
+      log.info('intake', 'auto-duplicate-ingress', {
+        chatId: msg.chatId,
+        msgId: msg.messageId,
+        ruleId: autoMatch.rule.id,
+      });
+      return;
+    }
     const settleMs = autoMatch.rule.settleMs;
     if (settleMs && settleMs > 0 && !isAutoSettledMessage(msg)) {
       const ttlMs = settleMs + (autoMatch.rule.cooldownMs ?? controls.cfg.larkBot?.dedupeTtlMs ?? 10 * 60 * 1000);
@@ -869,9 +883,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
   const chatMode = await chatModeCache.resolve(channel, msg.chatId);
-  const scope = chatMode === 'topic' && msg.threadId
-    ? `${msg.chatId}:${msg.threadId}`
-    : msg.chatId;
+  const scope = scopeForMessage(msg, chatMode);
   log.info('intake', 'enter', {
     scope,
     chatType: msg.chatType,
@@ -946,6 +958,16 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
 
   const size = pending.push(scope, msg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+}
+
+function scopeForMessage(msg: NormalizedMessage, chatMode: ChatMode): string {
+  const meta = autoAnswerMeta(msg);
+  if (meta?.replyInThread) {
+    const anchor = msg.threadId ?? msg.messageId;
+    return `${msg.chatId}:auto:${meta.ruleId ?? 'rule'}:${anchor}`;
+  }
+  if (chatMode === 'topic' && msg.threadId) return `${msg.chatId}:${msg.threadId}`;
+  return msg.chatId;
 }
 
 function scheduleAutoSettle(input: {
@@ -1082,7 +1104,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   if (!firstMsg || !lastMsg) return;
 
   const chatId = firstMsg.chatId;
-  const threadId = firstMsg.threadId;
+  const replyMsg = lastMsg;
+  const threadId = firstMsg.threadId ?? replyMsg.threadId;
   const autoMeta = autoAnswerMeta(firstMsg);
 
   const resourceItems = batch.flatMap((m) =>
@@ -1133,9 +1156,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // For topic groups: thread the reply so it lands in the same topic as the
   // user's message. Otherwise the SDK posts at top level and the user's
   // topic discussion breaks visually.
+  const shouldReplyInThread = autoMeta?.replyInThread ?? (mode === 'topic' && Boolean(threadId));
   const sendOpts = {
-    replyTo: lastMsg.messageId,
-    ...((autoMeta?.replyInThread ?? (mode === 'topic' && Boolean(threadId))) ? { replyInThread: true } : {}),
+    replyTo: replyMsg.messageId,
+    ...(shouldReplyInThread ? { replyInThread: true } : {}),
   };
 
   const accessDecision = autoMeta
@@ -1320,84 +1344,65 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         },
       });
     } else if (replyMode === 'markdown') {
-      let latestState: RunState = initialState;
-      let finalStreamUpdateFailed = false;
-      let finalRepairDone = false;
-      let producerStarted = false;
-      let markdownStreamMessageId: string | undefined;
-      let markdownCtrl:
-        | { setContent(markdown: string): Promise<void>; readonly messageId?: string }
-        | undefined;
-      const repairFinalMarkdownReply = async (
-        state: RunState,
-        reason: string,
-      ): Promise<void> => {
-        finalRepairDone = true;
-        const body = renderText(filterForPrefs(state));
-        await hardUpdateMarkdownFinalReply({
+      let managedMessageId: string | undefined;
+      try {
+        const result = await channel.send(
+          chatId,
+          { card: renderMarkdownRunCard(filterForPrefs(initialState)) },
+          sendOpts,
+        );
+        managedMessageId = sendResultMessageId(result);
+      } catch (err) {
+        log.fail('stream', err, { mode: replyMode, step: 'managed-markdown-initial-send' });
+      }
+
+      if (managedMessageId) {
+        const updater = createManagedMarkdownUpdater({
+          channel,
+          messageId: managedMessageId,
+          render: (state) => renderMarkdownRunCard(filterForPrefs(state)),
+        });
+        const finalState = await processAgentStream(
+          handle,
+          eventStream,
+          scope,
+          idleTimeoutMs,
+          recordSession,
+          async (state) => {
+            await updater.update(state);
+          },
+        );
+        const ok = await updater.finalize(finalState);
+        if (!ok) {
+          await sendFinalMarkdownFallbackReply({
+            channel,
+            chatId,
+            sendOpts,
+            state: finalState,
+            body: renderText(filterForPrefs(finalState)),
+            reason: 'managed-markdown-final-update',
+            hasManagedMessage: true,
+          });
+        }
+      } else {
+        log.warn('stream', 'managed-markdown-no-message-id', { mode: replyMode });
+        const finalState = await processAgentStream(
+          handle,
+          eventStream,
+          scope,
+          idleTimeoutMs,
+          recordSession,
+          async () => {},
+        );
+        await sendFinalMarkdownFallbackReply({
           channel,
           chatId,
           sendOpts,
-          messageId: markdownStreamMessageId,
-          state,
-          body,
-          reason,
+          state: finalState,
+          body: renderText(filterForPrefs(finalState)),
+          reason: 'managed-markdown-no-message-id',
+          hasManagedMessage: false,
         });
-      };
-      const renderDone = processAgentStream(
-        handle,
-        eventStream,
-        scope,
-        idleTimeoutMs,
-        recordSession,
-        async (state) => {
-          latestState = state;
-          if (markdownCtrl) {
-            const ctrl = markdownCtrl;
-            const body = renderText(filterForPrefs(state));
-            const ok = await updateStreamContent(
-              replyMode,
-              state,
-              { contentType: 'markdown', chars: body.length },
-              () => ctrl.setContent(body),
-            );
-            if (state.terminal !== 'running') finalStreamUpdateFailed = !ok;
-          }
-        },
-      );
-      const streamDone = channel.stream(
-        chatId,
-        {
-          markdown: async (ctrl) => {
-            producerStarted = true;
-            markdownCtrl = ctrl;
-            markdownStreamMessageId = ctrl.messageId || markdownStreamMessageId;
-            const body = renderText(filterForPrefs(latestState));
-            const ok = await updateStreamContent(
-              replyMode,
-              latestState,
-              { contentType: 'markdown', chars: body.length },
-              () => ctrl.setContent(body),
-            );
-            if (latestState.terminal !== 'running') finalStreamUpdateFailed = !ok;
-            await renderDone;
-          },
-        },
-        sendOpts,
-      ).then((result) => {
-        markdownStreamMessageId = streamResultMessageId(result) || markdownStreamMessageId;
-        return result;
-      });
-      await awaitRenderAwareStream({
-        mode: replyMode,
-        streamDone,
-        renderDone,
-        producerStarted: () => producerStarted,
-        needsFallback: () => finalStreamUpdateFailed,
-        fallback: (state) => repairFinalMarkdownReply(state, 'stream-fallback'),
-      });
-      if (!finalRepairDone && latestState.terminal !== 'running') {
-        await repairFinalMarkdownReply(latestState, 'stream-finalize');
       }
     } else {
       // text mode: drain the agent stream without sending anything during
@@ -1673,63 +1678,134 @@ async function runFallbackReply(
   }
 }
 
-async function hardUpdateMarkdownFinalReply(input: {
+function createManagedMarkdownUpdater(input: {
+  channel: LarkChannel;
+  messageId: string;
+  render: (state: RunState) => object;
+}): {
+  update(state: RunState): Promise<void>;
+  finalize(state: RunState): Promise<boolean>;
+} {
+  let latestState: RunState = initialState;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let updateChain: Promise<boolean> = Promise.resolve(true);
+  let lastUpdateAt = 0;
+  let finalResult: boolean | undefined;
+
+  const apply = async (state: RunState, reason: string): Promise<boolean> => {
+    const terminal = state.terminal !== 'running';
+    const attempts = terminal ? FINAL_STREAM_UPDATE_ATTEMPTS : 1;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        await input.channel.updateCard(input.messageId, input.render(state));
+        lastUpdateAt = Date.now();
+        if (terminal) {
+          log.info('stream', 'managed-markdown-final-update', {
+            mode: 'markdown',
+            reason,
+            messageId: input.messageId,
+            terminal: state.terminal,
+            attempt,
+          });
+        }
+        return true;
+      } catch (err) {
+        if (terminal && attempt < attempts) {
+          log.warn('stream', 'managed-markdown-final-update-retry', {
+            mode: 'markdown',
+            reason,
+            messageId: input.messageId,
+            terminal: state.terminal,
+            attempt,
+          });
+          await delay(FINAL_STREAM_UPDATE_RETRY_MS * attempt);
+          continue;
+        }
+        log.fail('stream', err, {
+          mode: 'markdown',
+          step: terminal ? 'managed-markdown-final-update' : 'managed-markdown-update',
+          reason,
+          messageId: input.messageId,
+          terminal: state.terminal,
+          attempt,
+        });
+        return false;
+      }
+    }
+    return false;
+  };
+
+  const enqueue = (state: RunState, reason: string): Promise<boolean> => {
+    updateChain = updateChain.then(() => apply(state, reason));
+    return updateChain;
+  };
+
+  const clearScheduled = (): void => {
+    if (!timer) return;
+    clearTimeout(timer);
+    timer = undefined;
+  };
+
+  const finalize = async (state: RunState): Promise<boolean> => {
+    if (finalResult !== undefined) return finalResult;
+    latestState = state;
+    clearScheduled();
+    await updateChain;
+    finalResult = await enqueue(state, 'finalize');
+    return finalResult;
+  };
+
+  return {
+    async update(state: RunState): Promise<void> {
+      latestState = state;
+      if (state.terminal !== 'running') {
+        await finalize(state);
+        return;
+      }
+      if (timer) return;
+      const elapsed = Date.now() - lastUpdateAt;
+      const delayMs = Math.max(0, MANAGED_MARKDOWN_UPDATE_THROTTLE_MS - elapsed);
+      if (delayMs === 0) {
+        void enqueue(state, 'update');
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = undefined;
+        void enqueue(latestState, 'throttled-update');
+      }, delayMs);
+    },
+    finalize,
+  };
+}
+
+async function sendFinalMarkdownFallbackReply(input: {
   channel: LarkChannel;
   chatId: string;
   sendOpts: SendOptions;
-  messageId: string | undefined;
   state: RunState;
   body: string;
   reason: string;
+  hasManagedMessage: boolean;
 }): Promise<void> {
-  if (!input.messageId && !input.body.trim() && input.state.terminal === 'done') {
-    log.info('stream', 'final-hard-update-skipped', {
-      mode: 'markdown',
-      reason: input.reason,
-      terminal: input.state.terminal,
-    });
-    return;
-  }
-
   const body = finalMarkdownBody(input.body, input.state);
-  if (input.messageId) {
-    try {
-      await input.channel.updateCard(
-        input.messageId,
-        renderFinalMarkdownCard(body, input.state),
-      );
-      log.info('stream', 'final-hard-update', {
-        mode: 'markdown',
-        reason: input.reason,
-        messageId: input.messageId,
-        terminal: input.state.terminal,
-        chars: body.length,
-      });
-      return;
-    } catch (err) {
-      log.fail('stream', err, {
-        mode: 'markdown',
-        step: 'final-hard-update',
-        reason: input.reason,
-        messageId: input.messageId,
-      });
-    }
-  }
-
   await input.channel.send(input.chatId, { markdown: body }, input.sendOpts);
-  log.warn('stream', 'final-hard-update-fallback-sent', {
+  log.warn('stream', 'final-markdown-fallback-sent', {
     mode: 'markdown',
     reason: input.reason,
-    hasMessageId: Boolean(input.messageId),
+    hasManagedMessage: input.hasManagedMessage,
     terminal: input.state.terminal,
     chars: body.length,
   });
 }
 
-function streamResultMessageId(result: unknown): string | undefined {
+function sendResultMessageId(result: unknown): string | undefined {
   if (!result || typeof result !== 'object') return undefined;
   const messageId = (result as { messageId?: unknown }).messageId;
   return typeof messageId === 'string' ? messageId : undefined;
+}
+
+function renderMarkdownRunCard(state: RunState): object {
+  return renderFinalMarkdownCard(finalMarkdownBody(renderText(state), state), state);
 }
 
 function renderFinalMarkdownCard(body: string, state: RunState): object {

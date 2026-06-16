@@ -58,8 +58,9 @@ interface FakeLarkChannel {
   disconnect(): Promise<void>;
   getChatMode(chatId: string): Promise<'group' | 'topic'>;
   getConnectionStatus(): { state: 'connected'; reconnectAttempts: number };
-  send(chatId: string, content: unknown, options?: unknown): Promise<void>;
+  send(chatId: string, content: unknown, options?: unknown): Promise<{ messageId?: string }>;
   stream(chatId: string, input: unknown, options?: unknown): Promise<void>;
+  updateCard(messageId: string, card: object): Promise<void>;
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -300,6 +301,7 @@ async function startTestBridge(h: {
 
 function createFakeLarkChannel(): FakeLarkChannel & { handlers: MessageHandlerMap } {
   const handlers: MessageHandlerMap = {};
+  let nextMessage = 1;
   return {
     handlers,
     botIdentity: { openId: 'ou_bot', name: 'Bridge' },
@@ -337,12 +339,15 @@ function createFakeLarkChannel(): FakeLarkChannel & { handlers: MessageHandlerMa
     getConnectionStatus() {
       return { state: 'connected', reconnectAttempts: 0 };
     },
-    async send() {},
+    async send() {
+      return { messageId: `om_sent_${nextMessage++}` };
+    },
     async stream(_chatId, input) {
       if (isMarkdownStreamInput(input)) {
         await input.markdown({ setContent: async () => {} });
       }
     },
+    async updateCard() {},
   };
 }
 

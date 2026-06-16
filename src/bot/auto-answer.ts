@@ -239,6 +239,10 @@ export class AutoAnswerRuntime {
     return this.tryRecord(`message:${messageId}`, ttlMs, { messageId }).ok;
   }
 
+  tryRecordIngress(messageId: string, ttlMs?: number): boolean {
+    return this.tryRecord(`ingress:${messageId}`, ttlMs, { messageId }).ok;
+  }
+
   tryRecordSettle(ruleId: string, messageId: string, ttlMs?: number): boolean {
     return this.tryRecord(`settle:${ruleId}:${messageId}`, ttlMs, { ruleId, messageId }).ok;
   }
@@ -758,27 +762,40 @@ function extractFingerprintLineValue(text: string, label: string): string | unde
 }
 
 function extractInlineLabelValue(line: string, label: string): string | undefined {
-  const separator = line.indexOf(':') >= 0 ? ':' : line.indexOf('：') >= 0 ? '：' : '';
-  if (!separator) return undefined;
-  const [rawKey, ...rest] = line.split(separator);
+  const cleanLine = stripFingerprintMarkup(line).trim();
+  const separatorIndex = firstLabelSeparatorIndex(cleanLine);
+  if (separatorIndex < 0) return undefined;
+  const rawKey = cleanLine.slice(0, separatorIndex);
   if ((rawKey ?? '').trim() !== label) return undefined;
-  return rest.join(separator).trim();
+  return cleanLine.slice(separatorIndex + 1).trim();
 }
 
 function isStandaloneLabelLine(line: string, label: string): boolean {
-  const normalized = line.replace(/[：:]\s*$/, '').trim();
+  const normalized = stripFingerprintMarkup(line).replace(/[：:]\s*$/, '').trim();
   return normalized === label;
 }
 
 function normalizeFingerprintLineValue(value: string): string {
   return normalizeFingerprintText(
-    value
+    stripFingerprintMarkup(value)
       .replace(/\[([^\]]+)\]\((?:https?|lark):\/\/[^)\s]+\)/g, '$1')
       .replace(/\]\((?:https?|lark):\/\/[^)\s]+\)/g, '')
       .replace(/^\[\[/, '[')
       .replace(/(?:https?|lark):\/\/\S+/g, '')
       .trim(),
   );
+}
+
+function firstLabelSeparatorIndex(line: string): number {
+  const ascii = line.indexOf(':');
+  const fullWidth = line.indexOf('：');
+  if (ascii < 0) return fullWidth;
+  if (fullWidth < 0) return ascii;
+  return Math.min(ascii, fullWidth);
+}
+
+function stripFingerprintMarkup(value: string): string {
+  return value.replace(/<\/?[A-Za-z][A-Za-z0-9_-]*(?:\s+[^<>]*)?>/g, '');
 }
 
 function normalizeFingerprintValue(value: unknown): unknown {

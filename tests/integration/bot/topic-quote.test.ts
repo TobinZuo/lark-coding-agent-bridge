@@ -32,6 +32,9 @@ interface MessageHandlerMap {
 
 interface FakeLarkChannel {
   botIdentity: { openId: string; name: string };
+  streams: Array<{ chatId: string; options: unknown }>;
+  sent: Array<{ chatId: string; content: unknown; options?: unknown }>;
+  updatedCards: Array<{ messageId: string; card: object }>;
   rawClient: {
     request: ReturnType<typeof vi.fn>;
     im: {
@@ -51,8 +54,9 @@ interface FakeLarkChannel {
   disconnect(): Promise<void>;
   getChatMode(chatId: string): Promise<'group' | 'topic'>;
   getConnectionStatus(): { state: 'connected'; reconnectAttempts: number };
-  send(chatId: string, content: unknown, options?: unknown): Promise<void>;
+  send(chatId: string, content: unknown, options?: unknown): Promise<{ messageId?: string }>;
   stream(chatId: string, input: unknown, options?: unknown): Promise<void>;
+  updateCard(messageId: string, card: object): Promise<void>;
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -146,11 +150,69 @@ describe('topic message quote handling', () => {
       expect.objectContaining({ cardContentType: 'user_card_content' }),
     );
   });
+
+  it('keeps auto reply-in-thread cards in separate regular-group runs', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      larkBot: {
+        dedupeTtlMs: 60_000,
+        rules: [
+          {
+            id: 'alarm-card',
+            chatIds: ['oc_topic_chat'],
+            messageTypes: ['interactive'],
+            textMatchers: ['告警'],
+            promptTemplate: '请分析告警',
+            replyInThread: true,
+          },
+        ],
+      },
+    });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_alarm_a',
+        rootId: 'om_alarm_a',
+        parentId: 'om_alarm_a',
+        content: '支付告警 A',
+        rawContentType: 'interactive',
+        createTime: Date.now(),
+      }),
+    );
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_alarm_b',
+        rootId: 'om_alarm_b',
+        parentId: 'om_alarm_b',
+        content: '支付告警 B',
+        rawContentType: 'interactive',
+        createTime: Date.now(),
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 2 && h.channel.updatedCards.length === 2);
+
+    expect(h.agent.runOptions).toHaveLength(2);
+    expect(h.agent.runOptions[0]?.prompt).toContain('支付告警 A');
+    expect(h.agent.runOptions[0]?.prompt).not.toContain('支付告警 B');
+    expect(h.agent.runOptions[1]?.prompt).toContain('支付告警 B');
+    expect(h.agent.runOptions[1]?.prompt).not.toContain('支付告警 A');
+    expect(h.channel.sent.map((msg) => msg.options)).toEqual([
+      { replyTo: 'om_alarm_a', replyInThread: true },
+      { replyTo: 'om_alarm_b', replyInThread: true },
+    ]);
+    expect(h.channel.updatedCards.map((update) => update.messageId)).toEqual([
+      'om_sent_1',
+      'om_sent_2',
+    ]);
+  });
 });
 
 async function createHarness(options: {
   chatMode?: 'group' | 'topic';
   quotedMessages?: Record<string, string>;
+  larkBot?: ReturnType<typeof createDefaultProfileConfig>['larkBot'];
 } = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel & { handlers: MessageHandlerMap };
@@ -178,6 +240,7 @@ async function createHarness(options: {
   });
   const profileConfig = {
     ...baseProfileConfig,
+    ...(options.larkBot ? { larkBot: options.larkBot } : {}),
     workspaces: {
       ...baseProfileConfig.workspaces,
       default: workspace,
@@ -229,11 +292,18 @@ function createFakeLarkChannel(options: {
 } = {}): FakeLarkChannel & { handlers: MessageHandlerMap } {
   const handlers: MessageHandlerMap = {};
   const chatMode = options.chatMode ?? 'topic';
+  const streams: Array<{ chatId: string; options: unknown }> = [];
+  const sent: Array<{ chatId: string; content: unknown; options?: unknown }> = [];
+  const updatedCards: Array<{ messageId: string; card: object }> = [];
+  let nextMessage = 1;
   const quotedMessages = options.quotedMessages ?? {
     om_topic_root: 'topic root content',
   };
   return {
     handlers,
+    streams,
+    sent,
+    updatedCards,
     botIdentity: { openId: 'ou_bot', name: 'Bridge' },
     rawClient: {
       request: vi.fn(async () => ({ data: { items: [] } })),
@@ -272,11 +342,18 @@ function createFakeLarkChannel(options: {
     getConnectionStatus() {
       return { state: 'connected', reconnectAttempts: 0 };
     },
-    async send() {},
-    async stream(_chatId, input) {
+    async send(chatId, content, options) {
+      sent.push({ chatId, content, options });
+      return { messageId: `om_sent_${nextMessage++}` };
+    },
+    async stream(chatId, input, options) {
+      streams.push({ chatId, options });
       if (isMarkdownStreamInput(input)) {
         await input.markdown({ setContent: async () => {} });
       }
+    },
+    async updateCard(messageId, card) {
+      updatedCards.push({ messageId, card });
     },
   };
 }
@@ -301,6 +378,8 @@ function message(input: {
   parentId: string;
   threadId?: string;
   content: string;
+  rawContentType?: string;
+  createTime?: number;
 }): NormalizedMessage {
   return {
     messageId: input.messageId,
@@ -309,7 +388,7 @@ function message(input: {
     senderId: 'ou_user',
     senderName: 'User',
     content: input.content,
-    rawContentType: 'text',
+    rawContentType: input.rawContentType ?? 'text',
     resources: [],
     mentions: [{ key: '@_user_1', openId: 'ou_bot', name: 'Bridge', isBot: true }],
     mentionAll: false,
@@ -318,7 +397,7 @@ function message(input: {
     parentId: input.parentId,
     ...(input.threadId ? { threadId: input.threadId } : {}),
     replyToMessageId: input.parentId,
-    createTime: 1760000001000,
+    createTime: input.createTime ?? 1760000001000,
   } as unknown as NormalizedMessage;
 }
 

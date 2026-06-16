@@ -3,7 +3,6 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
-import { log } from '../../../src/core/logger.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
 import { FakeAgentAdapter, type FakeAgentEvents } from '../../helpers/fake-agent.js';
@@ -62,14 +61,12 @@ interface FakeLarkChannel {
   disconnect(): Promise<void>;
   getChatMode(chatId: string): Promise<'group' | 'topic'>;
   getConnectionStatus(): { state: 'connected'; reconnectAttempts: number };
-  send(chatId: string, content: unknown, options?: unknown): Promise<void>;
+  send(chatId: string, content: unknown, options?: unknown): Promise<{ messageId?: string }>;
   stream(chatId: string, input: unknown, options?: unknown): Promise<unknown>;
   updateCard(messageId: string, card: object): Promise<void>;
   addReaction(messageId: string, emojiType: string): Promise<string>;
   removeReaction(messageId: string, reactionId: string): Promise<void>;
 }
-
-type StreamFn = FakeLarkChannel['stream'];
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -81,12 +78,12 @@ afterEach(async () => {
 });
 
 describe('markdown stream startup failures', () => {
-  it('does not leave the IM queue blocked when the agent exits before stream producer starts', async () => {
+  it('updates a managed markdown card and leaves the IM queue unblocked when the agent fails', async () => {
     const h = await createHarness();
     await startTestBridge(h);
 
     await h.channel.handlers.message?.(message('om_first', 'first'));
-    await waitFor(() => h.agent.runOptions.length === 1);
+    await waitFor(() => h.channel.updatedCards.length === 1);
 
     await h.channel.handlers.message?.(message('om_second', 'second'));
     await waitFor(() => h.agent.runOptions.length === 2);
@@ -96,8 +93,11 @@ describe('markdown stream startup failures', () => {
         path: { message_id: 'om_first', reaction_id: 'reaction_1' },
       }),
     );
-    expect(lastMarkdown(h.channel)).toContain('agent 失败');
-    expect(lastMarkdown(h.channel)).toContain('codex exited with code 1');
+    expect(h.channel.stream).not.toHaveBeenCalled();
+    expect(h.channel.sent).toHaveLength(2);
+    expect(h.channel.sent[0]?.content).toHaveProperty('card');
+    expect(cardText(h.channel.updatedCards[0]?.card)).toContain('agent 失败');
+    expect(cardText(h.channel.updatedCards[0]?.card)).toContain('codex exited with code 1');
   });
 
   it('does not wait for the working reaction before draining a failed agent run', async () => {
@@ -108,172 +108,112 @@ describe('markdown stream startup failures', () => {
     await startTestBridge(h);
 
     await h.channel.handlers.message?.(message('om_first', 'first'));
-    await waitFor(() => h.agent.runOptions.length === 1);
+    await waitFor(() => h.channel.updatedCards.length === 1);
 
     await h.channel.handlers.message?.(message('om_second', 'second'));
     await waitFor(() => h.agent.runOptions.length === 2, 1000);
 
-    expect(lastMarkdown(h.channel)).toContain('agent 失败');
+    expect(cardText(h.channel.updatedCards[0]?.card)).toContain('agent 失败');
 
     reaction.resolve({ data: { reaction_id: 'reaction_1' } });
     await waitFor(() => h.channel.rawClient.im.v1.messageReaction.delete.mock.calls.length > 0);
   });
 
-  it('logs stream failures that arrive after terminal grace expires', async () => {
-    const streamFailure = deferred<void>();
-    let streamProducerStarted = false;
-    const h = await createHarness({
-      stream: async (_chatId, input) => {
-        const producer = (input as {
-          markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
-        }).markdown;
-        if (producer) {
-          streamProducerStarted = true;
-          void producer({ setContent: vi.fn(async () => {}) });
-        }
-        await streamFailure.promise;
-      },
-    });
-    const fail = vi.spyOn(log, 'fail').mockImplementation(() => {});
-    await startTestBridge(h);
-
-    await h.channel.handlers.message?.(message('om_first', 'first'));
-    await waitFor(() => streamProducerStarted);
-    await waitFor(
-      () => h.channel.rawClient.im.v1.messageReaction.delete.mock.calls.length > 0,
-      4500,
-    );
-
-    await h.channel.handlers.message?.(message('om_second', 'second'));
-    await waitFor(() => h.agent.runOptions.length === 2);
-
-    streamFailure.reject(new Error('late stream failed'));
-
-    await waitFor(() =>
-      fail.mock.calls.some((call) =>
-        call[0] === 'stream' &&
-        call[1] instanceof Error &&
-        call[1].message === 'late stream failed' &&
-        (call[2] as { step?: string } | undefined)?.step === 'stream-terminal-late',
-      ),
-    );
-  }, 10_000);
-
-  it('sends a final fallback reply when the stream does not settle after terminal flush', async () => {
-    const streamNeverSettles = deferred<void>();
-    let streamProducerStarted = false;
+  it('does not call channel.stream for markdown replies', async () => {
     const h = await createHarness({
       events: [[
         { type: 'text', delta: 'final answer' },
         { type: 'done', terminationReason: 'normal' },
       ]],
-      stream: async (_chatId, input) => {
-        const producer = (input as {
-          markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
-        }).markdown;
-        if (producer) {
-          streamProducerStarted = true;
-          await producer({ setContent: vi.fn(async () => {}) });
-        }
-        await streamNeverSettles.promise;
-      },
-    });
-    await startTestBridge(h);
-
-    await h.channel.handlers.message?.(message('om_first', 'first'));
-    await waitFor(() => streamProducerStarted);
-    await waitFor(
-      () =>
-        h.channel.sent.some((msg) =>
-          ((msg.content as { markdown?: string } | undefined)?.markdown ?? '').includes(
-            'final answer',
-          ),
-        ),
-      4500,
-    );
-
-    expect(lastMarkdown(h.channel)).not.toContain('正在');
-  }, 10_000);
-
-  it('sends a final fallback reply when the final stream update fails', async () => {
-    const h = await createHarness({
-      events: [[
-        { type: 'text', delta: 'final answer' },
-        { type: 'done', terminationReason: 'normal' },
-      ]],
-      stream: async (_chatId, input) => {
-        const producer = (input as {
-          markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
-        }).markdown;
-        if (!producer) return;
-        await producer({
-          setContent: vi.fn(async (markdown: string) => {
-            if (markdown.includes('final answer') && !markdown.includes('正在')) {
-              throw new Error('update failed');
-            }
-          }),
-        });
-      },
-    });
-    await startTestBridge(h);
-
-    await h.channel.handlers.message?.(message('om_first', 'first'));
-    await waitFor(
-      () =>
-        h.channel.sent.some((msg) =>
-          ((msg.content as { markdown?: string } | undefined)?.markdown ?? '').includes(
-            'final answer',
-          ),
-        ),
-      3000,
-    );
-
-    expect(lastMarkdown(h.channel)).not.toContain('正在');
-  }, 10_000);
-
-  it('hard-updates the original markdown stream message after terminal success', async () => {
-    const h = await createHarness({
-      events: [[
-        { type: 'text', delta: 'final answer' },
-        { type: 'done', terminationReason: 'normal' },
-      ]],
-      stream: async (_chatId, input) => {
-        const producer = (input as {
-          markdown?: (ctrl: {
-            readonly messageId?: string;
-            setContent(markdown: string): Promise<void>;
-          }) => Promise<void>;
-        }).markdown;
-        if (!producer) return { messageId: 'om_stream' };
-        await producer({
-          messageId: 'om_stream',
-          setContent: vi.fn(async () => {}),
-        });
-        return { messageId: 'om_stream' };
-      },
     });
     await startTestBridge(h);
 
     await h.channel.handlers.message?.(message('om_first', 'first'));
     await waitFor(() => h.channel.updatedCards.length > 0);
 
-    expect(h.channel.updatedCards).toHaveLength(1);
-    expect(h.channel.updatedCards[0]?.messageId).toBe('om_stream');
-    const summary = (h.channel.updatedCards[0]?.card as {
+    expect(h.channel.stream).not.toHaveBeenCalled();
+    expect(h.channel.sent).toHaveLength(1);
+    expect(h.channel.sent[0]?.content).toHaveProperty('card');
+    expect(cardText(h.channel.updatedCards.at(-1)?.card)).toContain('final answer');
+  });
+
+  it('sends a final fallback reply when the managed markdown final update fails', async () => {
+    const h = await createHarness({
+      events: [[
+        { type: 'text', delta: 'final answer' },
+        { type: 'done', terminationReason: 'normal' },
+      ]],
+      updateCard: vi.fn(async () => {
+        throw new Error('update failed');
+      }),
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_first', 'first'));
+    await waitFor(
+      () => h.channel.sent.some((msg) => markdownText(msg.content).includes('final answer')),
+      3000,
+    );
+
+    expect(h.channel.sent[0]?.content).toHaveProperty('card');
+    expect(lastMarkdown(h.channel)).toContain('final answer');
+  });
+
+  it('falls back to a final markdown reply when the initial managed card send fails', async () => {
+    const h = await createHarness({
+      events: [[
+        { type: 'text', delta: 'final answer' },
+        { type: 'done', terminationReason: 'normal' },
+      ]],
+      failInitialSend: true,
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_first', 'first'));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(lastMarkdown(h.channel)).toContain('final answer');
+    expect(h.channel.updatedCards).toHaveLength(0);
+  });
+
+  it('updates the managed markdown card after terminal success', async () => {
+    const h = await createHarness({
+      events: [[
+        { type: 'text', delta: 'final answer' },
+        { type: 'done', terminationReason: 'normal' },
+      ]],
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_first', 'first'));
+    await waitFor(() => h.channel.updatedCards.length > 0);
+
+    expect(h.channel.updatedCards.at(-1)?.messageId).toBe('om_sent_1');
+    const summary = (h.channel.updatedCards.at(-1)?.card as {
       config?: { summary?: { content?: string } };
     } | undefined)?.config?.summary?.content;
     expect(summary).toContain('final answer');
-    expect(summary).not.toBe('已完成');
-    const finalCard = JSON.stringify(h.channel.updatedCards[0]?.card);
+    const finalCard = JSON.stringify(h.channel.updatedCards.at(-1)?.card);
     expect(finalCard).toContain('final answer');
     expect(finalCard).not.toContain('正在调用工具');
-    expect(h.channel.sent).toHaveLength(0);
-  }, 10_000);
+    expect(h.channel.sent).toHaveLength(1);
+    expect(h.channel.sent[0]?.content).toHaveProperty('card');
+  });
 });
+
+type SendFn = (
+  chatId: string,
+  content: unknown,
+  options?: unknown,
+) => Promise<{ messageId?: string }>;
+
+type UpdateCardFn = (messageId: string, card: object) => Promise<void>;
 
 async function createHarness(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
-  stream?: StreamFn;
+  send?: SendFn;
+  updateCard?: UpdateCardFn;
+  failInitialSend?: boolean;
   events?: FakeAgentEvents;
 } = {}): Promise<{
   tmp: TmpProfile;
@@ -362,11 +302,14 @@ async function startTestBridge(h: {
 
 function createFakeLarkChannel(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
-  stream?: StreamFn;
+  send?: SendFn;
+  updateCard?: UpdateCardFn;
+  failInitialSend?: boolean;
 } = {}): FakeLarkChannel {
   const handlers: MessageHandlerMap = {};
   const sent: FakeLarkChannel['sent'] = [];
   const updatedCards: FakeLarkChannel['updatedCards'] = [];
+  let nextMessage = 1;
   const channel: FakeLarkChannel = {
     handlers,
     sent,
@@ -406,15 +349,20 @@ function createFakeLarkChannel(options: {
     getConnectionStatus() {
       return { state: 'connected', reconnectAttempts: 0 };
     },
-    async send(chatId, content, options) {
-      sent.push({ chatId, content, options });
-    },
-    stream: options.stream ?? (async () => {
+    send: options.send ?? (async (chatId, content, sendOptions) => {
+      if (options.failInitialSend && nextMessage === 1) {
+        nextMessage += 1;
+        throw new Error('send failed');
+      }
+      sent.push({ chatId, content, options: sendOptions });
+      return { messageId: `om_sent_${nextMessage++}` };
+    }),
+    stream: vi.fn(async () => {
       await new Promise<void>(() => {});
     }),
-    async updateCard(messageId, card) {
+    updateCard: options.updateCard ?? (async (messageId, card) => {
       updatedCards.push({ messageId, card });
-    },
+    }),
     async addReaction(messageId, emojiType) {
       const r = await channel.rawClient.im.v1.messageReaction.create({
         path: { message_id: messageId },
@@ -478,6 +426,28 @@ function lastMarkdown(channel: FakeLarkChannel): string {
   const content = channel.sent.at(-1)?.content as { markdown?: string } | undefined;
   expect(content?.markdown).toBeTypeOf('string');
   return content?.markdown ?? '';
+}
+
+function markdownText(content: unknown): string {
+  return ((content as { markdown?: unknown } | undefined)?.markdown as string | undefined) ?? '';
+}
+
+function cardText(card: unknown): string {
+  const pieces: string[] = [];
+  const visit = (value: unknown): void => {
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      pieces.push(String(value));
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    for (const nested of Object.values(value)) visit(nested);
+  };
+  visit(card);
+  return pieces.join('\n');
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
