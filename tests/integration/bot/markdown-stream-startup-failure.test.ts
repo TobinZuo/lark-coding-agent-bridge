@@ -35,6 +35,7 @@ interface FakeLarkChannel {
   botIdentity: { openId: string; name: string };
   handlers: MessageHandlerMap;
   sent: Array<{ chatId: string; content: unknown; options?: unknown }>;
+  updatedCards: Array<{ messageId: string; card: object }>;
   rawClient: {
     request: ReturnType<typeof vi.fn>;
     application: {
@@ -62,7 +63,8 @@ interface FakeLarkChannel {
   getChatMode(chatId: string): Promise<'group' | 'topic'>;
   getConnectionStatus(): { state: 'connected'; reconnectAttempts: number };
   send(chatId: string, content: unknown, options?: unknown): Promise<void>;
-  stream(chatId: string, input: unknown, options?: unknown): Promise<void>;
+  stream(chatId: string, input: unknown, options?: unknown): Promise<unknown>;
+  updateCard(messageId: string, card: object): Promise<void>;
   addReaction(messageId: string, emojiType: string): Promise<string>;
   removeReaction(messageId: string, reactionId: string): Promise<void>;
 }
@@ -228,6 +230,45 @@ describe('markdown stream startup failures', () => {
 
     expect(lastMarkdown(h.channel)).not.toContain('正在');
   }, 10_000);
+
+  it('hard-updates the original markdown stream message after terminal success', async () => {
+    const h = await createHarness({
+      events: [[
+        { type: 'text', delta: 'final answer' },
+        { type: 'done', terminationReason: 'normal' },
+      ]],
+      stream: async (_chatId, input) => {
+        const producer = (input as {
+          markdown?: (ctrl: {
+            readonly messageId?: string;
+            setContent(markdown: string): Promise<void>;
+          }) => Promise<void>;
+        }).markdown;
+        if (!producer) return { messageId: 'om_stream' };
+        await producer({
+          messageId: 'om_stream',
+          setContent: vi.fn(async () => {}),
+        });
+        return { messageId: 'om_stream' };
+      },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_first', 'first'));
+    await waitFor(() => h.channel.updatedCards.length > 0);
+
+    expect(h.channel.updatedCards).toHaveLength(1);
+    expect(h.channel.updatedCards[0]?.messageId).toBe('om_stream');
+    const summary = (h.channel.updatedCards[0]?.card as {
+      config?: { summary?: { content?: string } };
+    } | undefined)?.config?.summary?.content;
+    expect(summary).toContain('final answer');
+    expect(summary).not.toBe('已完成');
+    const finalCard = JSON.stringify(h.channel.updatedCards[0]?.card);
+    expect(finalCard).toContain('final answer');
+    expect(finalCard).not.toContain('正在调用工具');
+    expect(h.channel.sent).toHaveLength(0);
+  }, 10_000);
 });
 
 async function createHarness(options: {
@@ -325,9 +366,11 @@ function createFakeLarkChannel(options: {
 } = {}): FakeLarkChannel {
   const handlers: MessageHandlerMap = {};
   const sent: FakeLarkChannel['sent'] = [];
+  const updatedCards: FakeLarkChannel['updatedCards'] = [];
   const channel: FakeLarkChannel = {
     handlers,
     sent,
+    updatedCards,
     botIdentity: { openId: 'ou_bot', name: 'Bridge' },
     rawClient: {
       request: vi.fn(async () => ({ data: { items: [] } })),
@@ -369,6 +412,9 @@ function createFakeLarkChannel(options: {
     stream: options.stream ?? (async () => {
       await new Promise<void>(() => {});
     }),
+    async updateCard(messageId, card) {
+      updatedCards.push({ messageId, card });
+    },
     async addReaction(messageId, emojiType) {
       const r = await channel.rawClient.im.v1.messageReaction.create({
         path: { message_id: messageId },

@@ -3,6 +3,7 @@ import type {
   LarkChannel,
   LarkChannelOptions,
   NormalizedMessage,
+  SendOptions,
 } from '@larksuite/channel';
 import { createLarkChannel } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
@@ -88,6 +89,8 @@ const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
 const FINAL_STREAM_UPDATE_ATTEMPTS = 3;
 const FINAL_STREAM_UPDATE_RETRY_MS = 250;
+const FINAL_MARKDOWN_CARD_ELEMENT_CHARS = 25_000;
+const FINAL_MARKDOWN_SUMMARY_CHARS = 160;
 const REACTION_CLEANUP_GRACE_MS = 1000;
 
 const BRIDGE_AGENT_INSTRUCTIONS = [
@@ -1319,8 +1322,28 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     } else if (replyMode === 'markdown') {
       let latestState: RunState = initialState;
       let finalStreamUpdateFailed = false;
+      let finalRepairDone = false;
       let producerStarted = false;
-      let markdownCtrl: { setContent(markdown: string): Promise<void> } | undefined;
+      let markdownStreamMessageId: string | undefined;
+      let markdownCtrl:
+        | { setContent(markdown: string): Promise<void>; readonly messageId?: string }
+        | undefined;
+      const repairFinalMarkdownReply = async (
+        state: RunState,
+        reason: string,
+      ): Promise<void> => {
+        finalRepairDone = true;
+        const body = renderText(filterForPrefs(state));
+        await hardUpdateMarkdownFinalReply({
+          channel,
+          chatId,
+          sendOpts,
+          messageId: markdownStreamMessageId,
+          state,
+          body,
+          reason,
+        });
+      };
       const renderDone = processAgentStream(
         handle,
         eventStream,
@@ -1348,6 +1371,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           markdown: async (ctrl) => {
             producerStarted = true;
             markdownCtrl = ctrl;
+            markdownStreamMessageId = ctrl.messageId || markdownStreamMessageId;
             const body = renderText(filterForPrefs(latestState));
             const ok = await updateStreamContent(
               replyMode,
@@ -1360,20 +1384,21 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           },
         },
         sendOpts,
-      );
+      ).then((result) => {
+        markdownStreamMessageId = streamResultMessageId(result) || markdownStreamMessageId;
+        return result;
+      });
       await awaitRenderAwareStream({
         mode: replyMode,
         streamDone,
         renderDone,
         producerStarted: () => producerStarted,
         needsFallback: () => finalStreamUpdateFailed,
-        fallback: async (state) => {
-          const body = renderText(filterForPrefs(state));
-          if (body.trim()) {
-            await channel.send(chatId, { markdown: body }, sendOpts);
-          }
-        },
+        fallback: (state) => repairFinalMarkdownReply(state, 'stream-fallback'),
       });
+      if (!finalRepairDone && latestState.terminal !== 'running') {
+        await repairFinalMarkdownReply(latestState, 'stream-finalize');
+      }
     } else {
       // text mode: drain the agent stream without sending anything during
       // the run, then post the final rendered text once as a plain markdown
@@ -1646,6 +1671,124 @@ async function runFallbackReply(
   } catch (err) {
     log.fail('stream', err, { mode, step: 'fallback' });
   }
+}
+
+async function hardUpdateMarkdownFinalReply(input: {
+  channel: LarkChannel;
+  chatId: string;
+  sendOpts: SendOptions;
+  messageId: string | undefined;
+  state: RunState;
+  body: string;
+  reason: string;
+}): Promise<void> {
+  if (!input.messageId && !input.body.trim() && input.state.terminal === 'done') {
+    log.info('stream', 'final-hard-update-skipped', {
+      mode: 'markdown',
+      reason: input.reason,
+      terminal: input.state.terminal,
+    });
+    return;
+  }
+
+  const body = finalMarkdownBody(input.body, input.state);
+  if (input.messageId) {
+    try {
+      await input.channel.updateCard(
+        input.messageId,
+        renderFinalMarkdownCard(body, input.state),
+      );
+      log.info('stream', 'final-hard-update', {
+        mode: 'markdown',
+        reason: input.reason,
+        messageId: input.messageId,
+        terminal: input.state.terminal,
+        chars: body.length,
+      });
+      return;
+    } catch (err) {
+      log.fail('stream', err, {
+        mode: 'markdown',
+        step: 'final-hard-update',
+        reason: input.reason,
+        messageId: input.messageId,
+      });
+    }
+  }
+
+  await input.channel.send(input.chatId, { markdown: body }, input.sendOpts);
+  log.warn('stream', 'final-hard-update-fallback-sent', {
+    mode: 'markdown',
+    reason: input.reason,
+    hasMessageId: Boolean(input.messageId),
+    terminal: input.state.terminal,
+    chars: body.length,
+  });
+}
+
+function streamResultMessageId(result: unknown): string | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const messageId = (result as { messageId?: unknown }).messageId;
+  return typeof messageId === 'string' ? messageId : undefined;
+}
+
+function renderFinalMarkdownCard(body: string, state: RunState): object {
+  return {
+    schema: '2.0',
+    config: {
+      streaming_mode: false,
+      summary: { content: finalMarkdownSummary(body, state) },
+    },
+    body: {
+      elements: splitFinalMarkdown(body).map((content) => ({
+        tag: 'markdown',
+        content,
+      })),
+    },
+  };
+}
+
+function finalMarkdownBody(body: string, state: RunState): string {
+  const trimmed = body.trim();
+  if (trimmed) return trimmed;
+  if (state.terminal === 'error' && state.errorMsg) return `⚠️ agent 失败:${state.errorMsg}`;
+  if (state.terminal === 'interrupted') return '_⏹ 已被中断_';
+  if (state.terminal === 'idle_timeout') {
+    const mins = state.idleTimeoutMinutes ?? 0;
+    return `_⏱ ${mins} 分钟无响应,已自动终止_`;
+  }
+  return '_（未返回内容）_';
+}
+
+function splitFinalMarkdown(body: string): string[] {
+  if (body.length <= FINAL_MARKDOWN_CARD_ELEMENT_CHARS) return [body];
+  const chunks: string[] = [];
+  let rest = body;
+  while (rest.length > FINAL_MARKDOWN_CARD_ELEMENT_CHARS) {
+    let cut = rest.lastIndexOf('\n\n', FINAL_MARKDOWN_CARD_ELEMENT_CHARS);
+    if (cut <= 0) cut = rest.lastIndexOf('\n', FINAL_MARKDOWN_CARD_ELEMENT_CHARS);
+    if (cut <= 0) cut = FINAL_MARKDOWN_CARD_ELEMENT_CHARS;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).trimStart();
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
+function finalMarkdownSummary(body: string, state: RunState): string {
+  const preview = finalMarkdownSummaryPreview(body);
+  if (preview) return preview;
+  if (state.terminal === 'interrupted') return '已中断';
+  if (state.terminal === 'idle_timeout') return '已超时';
+  if (state.terminal === 'error') return '出错';
+  return '已完成';
+}
+
+function finalMarkdownSummaryPreview(body: string): string {
+  const normalized = body.replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= FINAL_MARKDOWN_SUMMARY_CHARS) return normalized;
+  return `${normalized.slice(0, FINAL_MARKDOWN_SUMMARY_CHARS - 3).trimEnd()}...`;
 }
 
 function scheduleWorkingReactionCleanup(
