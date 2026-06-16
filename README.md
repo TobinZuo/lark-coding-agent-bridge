@@ -160,6 +160,59 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 
 DMs do not require an @ mention. Groups and topic groups require `@bot` by default; `@all` is ignored. Cloud-doc comments in supported document types run when the bot is mentioned.
 
+## Group auto-answer rules
+
+The bridge can dispatch matching group messages to the local agent automatically. It does not listen to every casual message by default. Only messages already received by the bridge or found by `larkBot.poller`, and matching `larkBot.rules`, trigger the agent. The poller warms up each enabled chat first and then only handles newly-created messages; restarts do not replay missed history.
+
+`settleMs` delays the auto-answer and refetches the same `message_id` before
+running the agent. This covers alert cards that are edited in place shortly
+after delivery, for example cards that later receive RCA or ACK content.
+
+Admins can also mention the bot in the target group and describe a listener task, for example, "watch this group for alert cards and use the lumen-aigc-infra-debug skill to analyze them in the alert topic". The bridge includes a built-in listener-rule planner, so no external skill configuration is required. It detects listener-configuration intent, generates a draft rule, validates the JSON, forces the rule to the current chat, and persists it after admin confirmation.
+
+This is an optional profile-field snippet. Do not replace the whole `config.json` with it; edit the matching profile's `larkBot` field only when you want to override the planner prompt, name an extra skill, tune limits, or disable planning:
+
+```json
+{
+  "larkBot": {
+    "rulePlanner": {
+      "enabled": true,
+      "skill": "optional-extra-listener-configurator",
+      "timeoutMs": 120000,
+      "maxOutputChars": 40000
+    }
+  }
+}
+```
+
+The planner is instructed to output JSON only. The core shape is:
+
+```json
+{
+  "rule": {
+    "messageTypes": ["interactive"],
+    "cardMatchers": [
+      { "path": "$text", "operator": "regex", "value": "报警|告警|alarm" }
+    ],
+    "promptTemplate": "Full prompt injected into the agent when the rule matches",
+    "replyInThread": true,
+    "cooldownMs": 300000,
+    "settleMs": 60000
+  },
+  "poller": {
+    "intervalMs": 10000,
+    "pageSize": 20
+  },
+  "summary": {
+    "trigger": "current group alert cards",
+    "analysis": "use lumen-aigc-infra-debug skill for read-only diagnosis",
+    "reply": "original message/topic"
+  }
+}
+```
+
+The bridge discards any `chatIds` emitted by the planner and forces the current group; it also rejects overly broad "all text messages" listeners. The admin must reply "确认规则" to persist the rule, enable `larkBot.poller`, and add the current chat to `poller.chatIds`. Set `"rulePlanner": { "enabled": false }` to disable in-chat natural-language rule creation.
+
 ## lark-cli identity policy
 
 Each profile uses a profile-local lark-cli directory at `~/.lark-channel/profiles/<profile>/lark-cli`. The agent process receives `LARKSUITE_CLI_CONFIG_DIR` for that directory, so personal authorization in one profile is not shared with another profile.

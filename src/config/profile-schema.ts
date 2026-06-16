@@ -1,5 +1,9 @@
 import type {
   AppCredentials,
+  LarkBotConfig,
+  LarkBotFingerprintConfig,
+  LarkBotMessageType,
+  LarkBotTriggerRule,
   AppPreferences,
   MessageReplyMode,
   SecretsConfig,
@@ -81,6 +85,7 @@ export interface ProfileConfig {
     app: AppCredentials;
   };
   secrets?: SecretsConfig;
+  larkBot?: LarkBotConfig;
   preferences: Omit<AppPreferences, 'access' | 'requireMentionInGroup'>;
   access: ProfileAccess;
   workspaces: {
@@ -117,6 +122,7 @@ export interface CreateDefaultProfileConfigInput {
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
   secrets?: SecretsConfig;
+  larkBot?: LarkBotConfig;
 }
 
 export function createDefaultProfileConfig(
@@ -137,6 +143,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     agentKind?: unknown;
     accounts?: unknown;
     secrets?: SecretsConfig;
+    larkBot?: unknown;
     preferences?: (AppPreferences & { access?: Partial<ProfileAccess> }) | undefined;
     access?: Partial<ProfileAccess>;
     workspaces?: {
@@ -167,6 +174,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
   }
 
   const preferences = normalizePreferences(raw.preferences);
+  const larkBot = normalizeLarkBot(raw.larkBot);
   const access = normalizeAccess(
     raw.access ?? raw.preferences?.access,
     raw.preferences?.requireMentionInGroup,
@@ -185,6 +193,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     agentKind: raw.agentKind,
     accounts,
     ...(raw.secrets ? { secrets: raw.secrets } : {}),
+    ...(larkBot ? { larkBot } : {}),
     preferences,
     access,
     workspaces,
@@ -202,6 +211,162 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     },
     comments,
     larkCli,
+  };
+}
+
+function normalizeLarkBot(input: unknown): LarkBotConfig | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const raw = input as LarkBotConfig;
+  const listener = normalizeLarkBotListener(raw.listener);
+  const poller = normalizeLarkBotPoller(raw.poller);
+  const rulePlanner = normalizeLarkBotRulePlanner(raw.rulePlanner);
+  const rules = Array.isArray(raw.rules)
+    ? raw.rules
+        .map(normalizeLarkBotRule)
+        .filter((rule): rule is NonNullable<ReturnType<typeof normalizeLarkBotRule>> => Boolean(rule))
+    : undefined;
+  const admins = stringArray(raw.admins);
+  const dedupeTtlMs =
+    typeof raw.dedupeTtlMs === 'number' && Number.isFinite(raw.dedupeTtlMs) && raw.dedupeTtlMs > 0
+      ? Math.floor(raw.dedupeTtlMs)
+      : undefined;
+  const defaultReplyMode = isMessageReply(raw.defaultReplyMode) ? raw.defaultReplyMode : undefined;
+  const out: LarkBotConfig = {
+    ...(listener ? { listener } : {}),
+    ...(poller ? { poller } : {}),
+    ...(rulePlanner ? { rulePlanner } : {}),
+    ...(rules && rules.length > 0 ? { rules } : {}),
+    ...(admins.length > 0 ? { admins } : {}),
+    ...(defaultReplyMode ? { defaultReplyMode } : {}),
+    ...(dedupeTtlMs ? { dedupeTtlMs } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizeLarkBotRulePlanner(
+  input: LarkBotConfig['rulePlanner'] | undefined,
+): LarkBotConfig['rulePlanner'] | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const timeoutMs = positiveInteger(input.timeoutMs);
+  const maxOutputChars = positiveInteger(input.maxOutputChars);
+  const out: NonNullable<LarkBotConfig['rulePlanner']> = {
+    ...(typeof input.enabled === 'boolean' ? { enabled: input.enabled } : {}),
+    ...(typeof input.skill === 'string' && input.skill.trim() ? { skill: input.skill.trim() } : {}),
+    ...(typeof input.promptTemplate === 'string' && input.promptTemplate.trim()
+      ? { promptTemplate: input.promptTemplate.trim() }
+      : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
+    ...(maxOutputChars ? { maxOutputChars } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizeLarkBotPoller(input: LarkBotConfig['poller'] | undefined): LarkBotConfig['poller'] | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const enabledAtMs = positiveInteger(input.enabledAtMs);
+  const intervalMs = positiveInteger(input.intervalMs);
+  const overlapMs = positiveInteger(input.overlapMs);
+  const maxLookbackMs = positiveInteger(input.maxLookbackMs);
+  const pageSize =
+    typeof input.pageSize === 'number' && Number.isFinite(input.pageSize) && input.pageSize > 0
+      ? Math.min(50, Math.floor(input.pageSize))
+      : undefined;
+  const chatIds = stringArray(input.chatIds);
+  const out: NonNullable<LarkBotConfig['poller']> = {
+    ...(typeof input.enabled === 'boolean' ? { enabled: input.enabled } : {}),
+    ...(enabledAtMs ? { enabledAtMs } : {}),
+    ...(intervalMs ? { intervalMs } : {}),
+    ...(overlapMs ? { overlapMs } : {}),
+    ...(maxLookbackMs ? { maxLookbackMs } : {}),
+    ...(pageSize ? { pageSize } : {}),
+    ...(chatIds.length > 0 ? { chatIds } : {}),
+    ...(typeof input.leaderId === 'string' && input.leaderId.trim() ? { leaderId: input.leaderId.trim() } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizeLarkBotListener(input: LarkBotConfig['listener'] | undefined): LarkBotConfig['listener'] | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const port =
+    typeof input.port === 'number' && Number.isFinite(input.port) && input.port > 0
+      ? Math.min(65535, Math.floor(input.port))
+      : undefined;
+  const maxBodyBytes =
+    typeof input.maxBodyBytes === 'number' && Number.isFinite(input.maxBodyBytes) && input.maxBodyBytes > 0
+      ? Math.floor(input.maxBodyBytes)
+      : undefined;
+  const eventMaxAgeMs =
+    typeof input.eventMaxAgeMs === 'number' && Number.isFinite(input.eventMaxAgeMs) && input.eventMaxAgeMs > 0
+      ? Math.floor(input.eventMaxAgeMs)
+      : undefined;
+  return {
+    ...(typeof input.enabled === 'boolean' ? { enabled: input.enabled } : {}),
+    ...(typeof input.host === 'string' && input.host.trim() ? { host: input.host.trim() } : {}),
+    ...(port ? { port } : {}),
+    ...(typeof input.webhookPath === 'string' && input.webhookPath.trim()
+      ? { webhookPath: input.webhookPath.trim() }
+      : {}),
+    ...(input.verificationToken ? { verificationToken: input.verificationToken } : {}),
+    ...(input.encryptKey ? { encryptKey: input.encryptKey } : {}),
+    ...(maxBodyBytes ? { maxBodyBytes } : {}),
+    ...(eventMaxAgeMs ? { eventMaxAgeMs } : {}),
+  };
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
+}
+
+function normalizeLarkBotRule(input: unknown): LarkBotTriggerRule | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const raw = input as LarkBotTriggerRule;
+  if (typeof raw.id !== 'string' || !raw.id.trim()) return undefined;
+  const messageTypes = stringArray(raw.messageTypes).filter(isLarkBotMessageType);
+  const textMatchers = Array.isArray(raw.textMatchers)
+    ? raw.textMatchers.filter(isValidTextMatcher)
+    : undefined;
+  const cardMatchers = Array.isArray(raw.cardMatchers)
+    ? raw.cardMatchers.filter(isValidCardMatcher)
+    : undefined;
+  const cooldownMs =
+    typeof raw.cooldownMs === 'number' && Number.isFinite(raw.cooldownMs) && raw.cooldownMs > 0
+      ? Math.floor(raw.cooldownMs)
+      : undefined;
+  const settleMs =
+    typeof raw.settleMs === 'number' && Number.isFinite(raw.settleMs) && raw.settleMs > 0
+      ? Math.floor(raw.settleMs)
+      : undefined;
+  const fingerprint = normalizeLarkBotFingerprint(raw.fingerprint);
+  return {
+    id: raw.id.trim(),
+    ...(typeof raw.enabled === 'boolean' ? { enabled: raw.enabled } : {}),
+    ...(stringArray(raw.chatIds).length > 0 ? { chatIds: stringArray(raw.chatIds) } : {}),
+    ...(messageTypes.length > 0 ? { messageTypes } : {}),
+    ...(textMatchers && textMatchers.length > 0 ? { textMatchers } : {}),
+    ...(cardMatchers && cardMatchers.length > 0 ? { cardMatchers } : {}),
+    ...(stringArray(raw.templateIds).length > 0 ? { templateIds: stringArray(raw.templateIds) } : {}),
+    ...(stringArray(raw.senderIds).length > 0 ? { senderIds: stringArray(raw.senderIds) } : {}),
+    ...(typeof raw.requireMention === 'boolean' ? { requireMention: raw.requireMention } : {}),
+    ...(typeof raw.agentProfile === 'string' && raw.agentProfile.trim() ? { agentProfile: raw.agentProfile.trim() } : {}),
+    ...(typeof raw.promptTemplate === 'string' && raw.promptTemplate.trim() ? { promptTemplate: raw.promptTemplate.trim() } : {}),
+    ...(typeof raw.replyInThread === 'boolean' ? { replyInThread: raw.replyInThread } : {}),
+    ...(cooldownMs ? { cooldownMs } : {}),
+    ...(fingerprint ? { fingerprint } : {}),
+    ...(settleMs ? { settleMs } : {}),
+  };
+}
+
+function normalizeLarkBotFingerprint(input: unknown): LarkBotFingerprintConfig | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const raw = input as LarkBotFingerprintConfig;
+  const mode = ['full', 'paths'].includes(String(raw.mode)) ? raw.mode : undefined;
+  const paths = stringArray(raw.paths).filter(Boolean);
+  if (!mode && paths.length === 0) return undefined;
+  return {
+    ...(mode ? { mode } : {}),
+    ...(paths.length > 0 ? { paths } : {}),
   };
 }
 
@@ -243,6 +408,49 @@ function normalizePreferences(
 
 function isMessageReply(value: unknown): value is MessageReplyMode {
   return value === 'card' || value === 'markdown' || value === 'text';
+}
+
+function isLarkBotMessageType(value: string): value is LarkBotMessageType {
+  return [
+    'text',
+    'post',
+    'interactive',
+    'image',
+    'file',
+    'audio',
+    'media',
+    'sticker',
+    'system',
+  ].includes(value);
+}
+
+function isValidTextMatcher(value: unknown): value is NonNullable<NonNullable<LarkBotConfig['rules']>[number]['textMatchers']>[number] {
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const matcher = value as { type?: unknown; value?: unknown; caseSensitive?: unknown };
+  return (
+    (matcher.type === undefined ||
+      matcher.type === 'contains' ||
+      matcher.type === 'equals' ||
+      matcher.type === 'regex') &&
+    typeof matcher.value === 'string' &&
+    matcher.value.trim().length > 0 &&
+    (matcher.caseSensitive === undefined || typeof matcher.caseSensitive === 'boolean')
+  );
+}
+
+function isValidCardMatcher(value: unknown): value is NonNullable<NonNullable<LarkBotConfig['rules']>[number]['cardMatchers']>[number] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const matcher = value as { path?: unknown; operator?: unknown; caseSensitive?: unknown };
+  return (
+    (matcher.path === undefined || typeof matcher.path === 'string') &&
+    (matcher.operator === undefined ||
+      matcher.operator === 'exists' ||
+      matcher.operator === 'equals' ||
+      matcher.operator === 'contains' ||
+      matcher.operator === 'regex') &&
+    (matcher.caseSensitive === undefined || typeof matcher.caseSensitive === 'boolean')
+  );
 }
 
 function normalizeAccess(

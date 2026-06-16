@@ -85,6 +85,94 @@ export interface AppAccess {
   admins?: string[];
 }
 
+export type LarkBotMessageType = 'text' | 'post' | 'interactive' | 'image' | 'file' | 'audio' | 'media' | 'sticker' | 'system';
+
+export interface LarkBotListenerConfig {
+  enabled?: boolean;
+  host?: string;
+  port?: number;
+  webhookPath?: string;
+  verificationToken?: SecretInput;
+  encryptKey?: SecretInput;
+  maxBodyBytes?: number;
+  eventMaxAgeMs?: number;
+}
+
+export interface LarkBotPollerConfig {
+  enabled?: boolean;
+  /** Millisecond timestamp when polling became active for these chats.
+   * Poller uses this as a lower bound so newly enabled chats do not replay
+   * earlier history, while still catching messages that arrive after enable
+   * but before the first polling tick. */
+  enabledAtMs?: number;
+  intervalMs?: number;
+  overlapMs?: number;
+  maxLookbackMs?: number;
+  pageSize?: number;
+  chatIds?: string[];
+  leaderId?: string;
+}
+
+export interface LarkBotRulePlannerConfig {
+  enabled?: boolean;
+  /** External agent skill used to draft listener rules from admin instructions. */
+  skill?: string;
+  /** Optional full planner prompt override. Must still return the documented JSON shape. */
+  promptTemplate?: string;
+  timeoutMs?: number;
+  maxOutputChars?: number;
+}
+
+export interface LarkBotTextMatcher {
+  type?: 'contains' | 'equals' | 'regex';
+  value: string;
+  caseSensitive?: boolean;
+}
+
+export interface LarkBotCardMatcher {
+  path?: string;
+  operator?: 'exists' | 'equals' | 'contains' | 'regex';
+  value?: unknown;
+  caseSensitive?: boolean;
+}
+
+export interface LarkBotFingerprintConfig {
+  /** Default/legacy: full card JSON or raw content. */
+  mode?: 'full' | 'paths';
+  /** JSON paths used when mode is "paths". Special paths: $text, $templateId, $line:<label>. */
+  paths?: string[];
+}
+
+export interface LarkBotTriggerRule {
+  id: string;
+  enabled?: boolean;
+  chatIds?: string[];
+  messageTypes?: LarkBotMessageType[];
+  textMatchers?: Array<string | LarkBotTextMatcher>;
+  cardMatchers?: LarkBotCardMatcher[];
+  templateIds?: string[];
+  senderIds?: string[];
+  requireMention?: boolean;
+  agentProfile?: string;
+  promptTemplate?: string;
+  replyInThread?: boolean;
+  cooldownMs?: number;
+  fingerprint?: LarkBotFingerprintConfig;
+  /** Wait before handling a matched message, then refetch the same message_id.
+   * Useful for cards that are updated in place shortly after delivery. */
+  settleMs?: number;
+}
+
+export interface LarkBotConfig {
+  listener?: LarkBotListenerConfig;
+  poller?: LarkBotPollerConfig;
+  rulePlanner?: LarkBotRulePlannerConfig;
+  rules?: LarkBotTriggerRule[];
+  admins?: string[];
+  defaultReplyMode?: MessageReplyMode;
+  dedupeTtlMs?: number;
+}
+
 export interface AppPreferences {
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
@@ -152,6 +240,7 @@ export interface AppConfig {
     app: AppCredentials;
   };
   secrets?: SecretsConfig;
+  larkBot?: LarkBotConfig;
   preferences?: AppPreferences;
 }
 

@@ -537,4 +537,95 @@ describe('profile schema', () => {
       maxAccess: 'workspace',
     });
   });
+
+  it('preserves lark bot listener and trigger rules', () => {
+    const cfg = normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'claude',
+      accounts: { app },
+      larkBot: {
+        listener: {
+          enabled: true,
+          host: '127.0.0.1',
+          port: 9090,
+          webhookPath: '/lark/events',
+          verificationToken: '${LARK_WEBHOOK_TOKEN}',
+          encryptKey: '${LARK_WEBHOOK_ENCRYPT_KEY}',
+        },
+        poller: {
+          enabled: true,
+          enabledAtMs: 1700000000000,
+          intervalMs: 10000,
+          overlapMs: 180000,
+          maxLookbackMs: 900000,
+          pageSize: 10,
+          chatIds: ['oc_alarm'],
+          leaderId: 'machine-a',
+        },
+        rulePlanner: {
+          enabled: true,
+          skill: 'lark-listener-configurator',
+          promptTemplate: 'Plan {{instruction}}',
+          timeoutMs: 60000,
+          maxOutputChars: 12000,
+        },
+        admins: ['ou_admin'],
+        rules: [
+          {
+            id: 'alarm-card',
+            chatIds: ['oc_alarm'],
+            messageTypes: ['interactive'],
+            cardMatchers: [{ path: '$text', operator: 'regex', value: '报警|alarm' }],
+            requireMention: false,
+            promptTemplate: '分析报警',
+            cooldownMs: 1000,
+            fingerprint: { mode: 'paths', paths: ['$line:服务', '$line:集群', '$line:规则'] },
+            settleMs: 60000,
+          },
+          {
+            id: '',
+          },
+        ],
+      },
+    });
+
+    expect(cfg.larkBot).toMatchObject({
+      listener: {
+        enabled: true,
+        host: '127.0.0.1',
+        port: 9090,
+        webhookPath: '/lark/events',
+      },
+      poller: {
+        enabled: true,
+        enabledAtMs: 1700000000000,
+        intervalMs: 10000,
+        overlapMs: 180000,
+        maxLookbackMs: 900000,
+        pageSize: 10,
+        chatIds: ['oc_alarm'],
+        leaderId: 'machine-a',
+      },
+      rulePlanner: {
+        enabled: true,
+        skill: 'lark-listener-configurator',
+        promptTemplate: 'Plan {{instruction}}',
+        timeoutMs: 60000,
+        maxOutputChars: 12000,
+      },
+      admins: ['ou_admin'],
+      rules: [
+        {
+          id: 'alarm-card',
+          chatIds: ['oc_alarm'],
+          messageTypes: ['interactive'],
+          requireMention: false,
+          promptTemplate: '分析报警',
+          cooldownMs: 1000,
+          fingerprint: { mode: 'paths', paths: ['$line:服务', '$line:集群', '$line:规则'] },
+          settleMs: 60000,
+        },
+      ],
+    });
+  });
 });

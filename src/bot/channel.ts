@@ -1,7 +1,9 @@
 import type {
+  ApiMessageItem,
   LarkChannel,
   LarkChannelOptions,
   NormalizedMessage,
+  SendOptions,
 } from '@larksuite/channel';
 import { createLarkChannel } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
@@ -62,9 +64,33 @@ import { fetchQuotedContext, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
+import {
+  AutoAnswerRuntime,
+  type AutoDedupeRecord,
+  type AutoRulePlanner,
+  type RuleMatch,
+  autoAnswerMeta,
+  normalizeIncomingMessage,
+  normalizedMessageFromIncoming,
+} from './auto-answer';
+import { startWebhookListener, type WebhookListener } from './webhook-listener';
+import { startLarkMessagePoller, type LarkMessagePoller } from './message-poller';
+import {
+  buildRulePlannerPrompt,
+  effectiveRulePlannerConfig,
+  parseRulePlannerText,
+  RulePlannerRejectedError,
+  type RulePlannerDraft,
+  type RulePlannerRequest,
+} from './rule-planner';
+import type { RunExecution } from '../runtime/run-executor';
 
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
+const FINAL_STREAM_UPDATE_ATTEMPTS = 3;
+const FINAL_STREAM_UPDATE_RETRY_MS = 250;
+const FINAL_MARKDOWN_CARD_ELEMENT_CHARS = 25_000;
+const FINAL_MARKDOWN_SUMMARY_CHARS = 160;
 const REACTION_CLEANUP_GRACE_MS = 1000;
 
 const BRIDGE_AGENT_INSTRUCTIONS = [
@@ -179,6 +205,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // so /config bumps take effect for the next run.
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
+  const autoAnswer = new AutoAnswerRuntime();
+  const autoSettleTimers = new Set<ReturnType<typeof setTimeout>>();
 
   // Resolve the App Secret to plaintext. The config field can be a literal
   // string, a "${VAR}" template, or a {source, id} SecretRef referencing
@@ -296,6 +324,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           chatModeCache,
           executor,
           pool,
+          autoAnswer,
+          autoSettleTimers,
         }),
       ).catch((err) => log.fail('intake', err));
     },
@@ -380,6 +410,58 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   });
   await ownerRefresh.start();
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
+  const webhookListener = await startWebhookListener({
+    cfg,
+    appPaths: deps.appPaths,
+    botOpenId: channel.botIdentity?.openId,
+    onMessage: async (msg) => {
+      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
+        intakeMessage({
+          channel,
+          agent,
+          sessions,
+          sessionCatalog,
+          workspaces,
+          activeRuns,
+          pending,
+          msg,
+          controls,
+          chatModeCache,
+          executor,
+          pool,
+          autoAnswer,
+          autoSettleTimers,
+          autoOnly: true,
+        }),
+      ).catch((err) => log.fail('webhook-intake', err));
+    },
+  });
+  const messagePoller = startLarkMessagePoller({
+    channel,
+    controls,
+    botOpenId: channel.botIdentity?.openId,
+    onMessage: async (msg) => {
+      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
+        intakeMessage({
+          channel,
+          agent,
+          sessions,
+          sessionCatalog,
+          workspaces,
+          activeRuns,
+          pending,
+          msg,
+          controls,
+          chatModeCache,
+          executor,
+          pool,
+          autoAnswer,
+          autoSettleTimers,
+          autoOnly: true,
+        }),
+      ).catch((err) => log.fail('poller-intake', err));
+    },
+  });
 
   const identity = channel.botIdentity;
   // Late-bind the bot's own IM identity into the agent adapter so the system
@@ -420,6 +502,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       ownerRefresh.stop();
       knownChatsRefresh.stop();
       keepalive.stop();
+      await stopWebhookListener(webhookListener);
+      stopMessagePoller(messagePoller);
+      for (const timer of autoSettleTimers) clearTimeout(timer);
+      autoSettleTimers.clear();
       pending.cancelAll();
       const [disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),
@@ -464,6 +550,24 @@ function startKnownChatsRefreshTimer(
   };
 }
 
+async function stopWebhookListener(listener: WebhookListener | undefined): Promise<void> {
+  if (!listener) return;
+  try {
+    await listener.stop();
+  } catch (err) {
+    log.fail('webhook', err, { step: 'stop' });
+  }
+}
+
+function stopMessagePoller(poller: LarkMessagePoller | undefined): void {
+  if (!poller) return;
+  try {
+    poller.stop();
+  } catch (err) {
+    log.fail('message-poller', err, { step: 'stop' });
+  }
+}
+
 async function sendNonAllowedGroupHint(
   channel: LarkChannel,
   chatId: string,
@@ -479,6 +583,78 @@ async function sendNonAllowedGroupHint(
   }
 }
 
+async function sendAutoDuplicateNotice(
+  channel: LarkChannel,
+  msg: NormalizedMessage,
+  match: RuleMatch,
+  record: AutoDedupeRecord,
+): Promise<void> {
+  const text = [
+    `同类消息在 ${formatDuration(record.ttlMs)} 内重复，已处理过。`,
+    `上次处理时间：${formatLocalTimestamp(record.firstSeenAt)}`,
+    '本次不重复触发分析。',
+  ].join('\n');
+  const sendOpts = {
+    replyTo: msg.messageId,
+    ...((match.rule.replyInThread ?? Boolean(msg.threadId)) ? { replyInThread: true } : {}),
+  };
+  try {
+    await channel.send(msg.chatId, { markdown: text }, sendOpts);
+    log.info('auto-answer', 'duplicate-notice-sent', {
+      chatId: msg.chatId,
+      messageId: msg.messageId,
+      ruleId: match.rule.id,
+      replyInThread: sendOpts.replyInThread === true,
+    });
+  } catch (err) {
+    log.warn('auto-answer', 'duplicate-notice-thread-send-failed', {
+      chatId: msg.chatId,
+      messageId: msg.messageId,
+      ruleId: match.rule.id,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    try {
+      await channel.send(msg.chatId, { markdown: text }, { replyTo: msg.messageId });
+      log.info('auto-answer', 'duplicate-notice-fallback-sent', {
+        chatId: msg.chatId,
+        messageId: msg.messageId,
+        ruleId: match.rule.id,
+      });
+    } catch (fallbackErr) {
+      log.fail('auto-answer', fallbackErr, {
+        step: 'duplicate-notice-send',
+        chatId: msg.chatId,
+        messageId: msg.messageId,
+        ruleId: match.rule.id,
+      });
+    }
+  }
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.max(1, Math.ceil(ms / 1000))} 秒`;
+  if (ms % 60_000 === 0) return `${Math.max(1, Math.round(ms / 60_000))} 分钟`;
+  return `${Math.max(1, Math.ceil(ms / 60_000))} 分钟`;
+}
+
+function formatLocalTimestamp(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return [
+    d.getFullYear(),
+    '-',
+    pad(d.getMonth() + 1),
+    '-',
+    pad(d.getDate()),
+    ' ',
+    pad(d.getHours()),
+    ':',
+    pad(d.getMinutes()),
+    ':',
+    pad(d.getSeconds()),
+  ].join('');
+}
+
 interface IntakeDeps {
   channel: LarkChannel;
   agent: AgentAdapter;
@@ -492,6 +668,105 @@ interface IntakeDeps {
   chatModeCache: ChatModeCache;
   executor: RunExecutor;
   pool: ProcessPool;
+  autoAnswer: AutoAnswerRuntime;
+  autoSettleTimers: Set<ReturnType<typeof setTimeout>>;
+  autoOnly?: boolean;
+}
+
+function rulePlannerFor(deps: IntakeDeps): AutoRulePlanner | undefined {
+  const planner = effectiveRulePlannerConfig(deps.controls.cfg.larkBot?.rulePlanner);
+  if (!planner) return undefined;
+  return (request) => runRulePlanner({ ...deps, request });
+}
+
+async function runRulePlanner(input: IntakeDeps & {
+  request: RulePlannerRequest;
+}): Promise<RulePlannerDraft> {
+  const { controls, request, sessions, workspaces, executor } = input;
+  const planner = effectiveRulePlannerConfig(controls.cfg.larkBot?.rulePlanner);
+  if (!planner) throw new Error('larkBot.rulePlanner is disabled');
+
+  const prompt = buildRulePlannerPrompt(planner, request);
+  const capability =
+    controls.profileConfig.agentKind === 'codex'
+      ? codexCapability(controls.profileConfig)
+      : claudeCapability(controls.profileConfig);
+  const flow = await startRunFlow({
+    scopeId: `__auto-rule-planner:${request.chatId}:${request.messageId}`,
+    scope: {
+      source: 'im',
+      chatId: request.chatId,
+      actorId: request.senderId,
+    },
+    prompt,
+    attachments: [],
+    access: { ok: true, reason: 'allowed-admin' },
+    capability,
+    profileConfig: controls.profileConfig,
+    sessions,
+    sessionCatalog: undefined,
+    workspaces,
+    executor,
+    now: Date.now(),
+    stopGraceMs: getAgentStopGraceMs(controls.cfg),
+    observability: {
+      profile: controls.profile,
+      agent: capability.agentId,
+      source: 'auto-rule-planner',
+      stage: 'rule-planner',
+    },
+  });
+  if (!flow.ok) {
+    throw new Error(flow.rejectReason.userVisible);
+  }
+
+  const output = await collectPlannerOutput(flow.execution, {
+    timeoutMs: planner.timeoutMs ?? 120_000,
+    maxOutputChars: planner.maxOutputChars ?? 40_000,
+  });
+  const parsed = parseRulePlannerText(output, request);
+  if (!parsed.ok) {
+    if (parsed.rejected) throw new RulePlannerRejectedError(parsed.error, parsed.rejectionKind);
+    throw new Error(parsed.error);
+  }
+  log.info('auto-rule-planner', 'drafted', {
+    chatId: request.chatId,
+    msgId: request.messageId,
+    ruleId: parsed.draft.rule.id,
+  });
+  return parsed.draft;
+}
+
+async function collectPlannerOutput(
+  execution: RunExecution,
+  opts: { timeoutMs: number; maxOutputChars: number },
+): Promise<string> {
+  let output = '';
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const consume = (async (): Promise<string> => {
+    for await (const event of execution.subscribe()) {
+      if (event.type === 'text') {
+        output += event.delta;
+        if (output.length > opts.maxOutputChars) {
+          throw new Error(`planner output exceeded ${opts.maxOutputChars} chars`);
+        }
+      }
+      if (event.type === 'error') throw new Error(event.message);
+      if (event.type === 'done') return output;
+    }
+    return output;
+  })();
+  const timer = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error(`planner timed out after ${opts.timeoutMs}ms`)), opts.timeoutMs);
+  });
+  try {
+    return await Promise.race([consume, timer]);
+  } catch (err) {
+    await execution.stop().catch(() => {});
+    throw err;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 async function intakeMessage(deps: IntakeDeps): Promise<void> {
@@ -503,12 +778,93 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     workspaces,
     activeRuns,
     pending,
-    msg,
     controls,
     chatModeCache,
     executor,
     pool,
+    autoAnswer,
+    autoSettleTimers,
+    autoOnly,
   } = deps;
+  let { msg } = deps;
+  if (!autoOnly) {
+    const configHandled = await autoAnswer.tryHandleAdminConfig({
+      channel,
+      controls,
+      msg,
+      planRule: rulePlannerFor(deps),
+    });
+    if (configHandled) {
+      log.info('intake', 'auto-config-command', { chatId: msg.chatId, msgId: msg.messageId });
+      return;
+    }
+  }
+  const autoMatch = autoAnswer.matchMessage(controls.cfg, msg, channel.botIdentity?.openId, controls.profile, {
+    recordFingerprint: false,
+  });
+  if (autoOnly && !autoMatch) {
+    return;
+  }
+  if (autoMatch) {
+    const settleMs = autoMatch.rule.settleMs;
+    if (settleMs && settleMs > 0 && !isAutoSettledMessage(msg)) {
+      const ttlMs = settleMs + (autoMatch.rule.cooldownMs ?? controls.cfg.larkBot?.dedupeTtlMs ?? 10 * 60 * 1000);
+      if (!autoAnswer.tryRecordSettle(autoMatch.rule.id, msg.messageId, ttlMs)) {
+        log.info('intake', 'auto-settle-duplicate', {
+          chatId: msg.chatId,
+          msgId: msg.messageId,
+          ruleId: autoMatch.rule.id,
+        });
+        return;
+      }
+      scheduleAutoSettle({
+        deps,
+        msg,
+        settleMs,
+        timers: autoSettleTimers,
+        botOpenId: channel.botIdentity?.openId,
+      });
+      log.info('intake', 'auto-settle-scheduled', {
+        chatId: msg.chatId,
+        msgId: msg.messageId,
+        ruleId: autoMatch.rule.id,
+        settleMs,
+      });
+      return;
+    }
+    const autoMessageDedupeTtlMs = Math.max(
+      controls.cfg.larkBot?.dedupeTtlMs ?? 10 * 60 * 1000,
+      autoMatch.rule.cooldownMs ?? 0,
+    );
+    if (!autoAnswer.tryRecordMessage(msg.messageId, autoMessageDedupeTtlMs)) {
+      log.info('intake', 'auto-duplicate-message', { chatId: msg.chatId, msgId: msg.messageId });
+      return;
+    }
+    const fingerprintRecord = autoAnswer.tryRecordFingerprint(
+      autoMatch.rule,
+      autoMatch.fingerprint,
+      msg,
+      controls.cfg.larkBot?.dedupeTtlMs,
+    );
+    if (!fingerprintRecord.ok) {
+      log.info('auto-answer', 'dedupe-fingerprint', {
+        ruleId: autoMatch.rule.id,
+        chatId: msg.chatId,
+        messageId: msg.messageId,
+        firstSeenAt: fingerprintRecord.record.firstSeenAt,
+        duplicateCount: fingerprintRecord.record.duplicateCount,
+      });
+      await sendAutoDuplicateNotice(channel, msg, autoMatch, fingerprintRecord.record);
+      return;
+    }
+    msg = autoMatch.message;
+    log.info('intake', 'auto-rule-match', {
+      chatId: msg.chatId,
+      msgId: msg.messageId,
+      ruleId: autoMatch.rule.id,
+      fingerprint: autoMatch.fingerprint,
+    });
+  }
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
@@ -525,8 +881,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     resources: msg.resources.length,
   });
 
-  const accessDecision =
-    msg.chatType === 'p2p'
+  const accessDecision = autoAnswerMeta(msg)
+    ? ({ ok: true, reason: 'allowed-chat' } as const)
+    : msg.chatType === 'p2p'
       ? canUseDm(controls.profileConfig, controls, msg.senderId)
       : canUseGroup(controls.profileConfig, controls, msg.chatId, msg.senderId);
   if (!accessDecision.ok) {
@@ -551,6 +908,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // event reaching here is either targeted or undirected chatter.
   if (
     msg.chatType !== 'p2p' &&
+    !autoAnswerMeta(msg) &&
     getRequireMentionInGroup(controls.cfg) &&
     !msg.mentionedBot
   ) {
@@ -590,6 +948,104 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
 }
 
+function scheduleAutoSettle(input: {
+  deps: IntakeDeps;
+  msg: NormalizedMessage;
+  settleMs: number;
+  timers: Set<ReturnType<typeof setTimeout>>;
+  botOpenId?: string;
+}): void {
+  const timer = setTimeout(() => {
+    input.timers.delete(timer);
+    void withTrace({ chatId: input.msg.chatId, msgId: input.msg.messageId }, async () => {
+      const latest =
+        (await fetchLatestAutoMessage(input.deps.channel, input.msg, input.botOpenId)) ?? input.msg;
+      await intakeMessage({
+        ...input.deps,
+        msg: markAutoSettledMessage(latest),
+        autoOnly: true,
+      });
+    }).catch((err) => log.fail('auto-settle', err, { msgId: input.msg.messageId }));
+  }, input.settleMs);
+  input.timers.add(timer);
+}
+
+async function fetchLatestAutoMessage(
+  channel: LarkChannel,
+  original: NormalizedMessage,
+  botOpenId?: string,
+): Promise<NormalizedMessage | undefined> {
+  let items: ApiMessageItem[];
+  try {
+    items = await channel.fetchRawMessage(original.messageId, {
+      cardContentType: 'user_card_content',
+    });
+  } catch (err) {
+    log.warn('auto-settle', 'fetch-failed', {
+      messageId: original.messageId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+  const parent = items[0];
+  if (!parent?.message_id) return undefined;
+
+  const incoming = normalizeIncomingMessage({
+    event: {
+      sender: {
+        sender_id: { open_id: parent.sender?.id ?? original.senderId },
+        sender_type: senderTypeFromMessage(original) ?? 'app',
+      },
+      message: {
+        message_id: parent.message_id,
+        chat_id: original.chatId,
+        chat_type: original.chatType,
+        message_type: parent.msg_type ?? original.rawContentType ?? 'text',
+        content: parent.body?.content ?? original.content,
+        create_time: parent.create_time !== undefined
+          ? String(parent.create_time)
+          : stringFromUnknown((original as { createTime?: unknown }).createTime),
+        ...(original.threadId ? { thread_id: original.threadId } : {}),
+        ...((original as { rootId?: string }).rootId ? { root_id: (original as { rootId?: string }).rootId } : {}),
+        ...(original.replyToMessageId ? { parent_id: original.replyToMessageId } : {}),
+        ...(parent.mentions ? { mentions: parent.mentions } : {}),
+      },
+    },
+  }, botOpenId);
+  return incoming ? normalizedMessageFromIncoming(incoming, { botOpenId }) : undefined;
+}
+
+function isAutoSettledMessage(msg: NormalizedMessage): boolean {
+  const raw = msg.raw as { __larkAutoSettle?: { settled?: unknown } } | undefined;
+  return raw?.__larkAutoSettle?.settled === true;
+}
+
+function markAutoSettledMessage(msg: NormalizedMessage): NormalizedMessage {
+  return {
+    ...msg,
+    raw: {
+      ...(isRecord(msg.raw) ? msg.raw : {}),
+      __larkAutoSettle: { settled: true },
+    },
+  } as unknown as NormalizedMessage;
+}
+
+function senderTypeFromMessage(msg: NormalizedMessage): 'user' | 'app' | 'bot' | undefined {
+  const raw = msg.raw as { sender?: { sender_type?: unknown } } | undefined;
+  const value = raw?.sender?.sender_type;
+  return value === 'user' || value === 'app' || value === 'bot' ? value : undefined;
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 interface RunBatchDeps {
   channel: LarkChannel;
   executor: RunExecutor;
@@ -627,6 +1083,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
+  const autoMeta = autoAnswerMeta(firstMsg);
 
   const resourceItems = batch.flatMap((m) =>
     m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
@@ -678,11 +1135,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // topic discussion breaks visually.
   const sendOpts = {
     replyTo: lastMsg.messageId,
-    ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
+    ...((autoMeta?.replyInThread ?? (mode === 'topic' && Boolean(threadId))) ? { replyInThread: true } : {}),
   };
 
-  const accessDecision =
-    firstMsg.chatType === 'p2p'
+  const accessDecision = autoMeta
+    ? ({ ok: true, reason: 'allowed-chat' } as const)
+    : firstMsg.chatType === 'p2p'
       ? canUseDm(controls.profileConfig, controls, firstMsg.senderId)
       : canUseGroup(controls.profileConfig, controls, firstMsg.chatId, firstMsg.senderId);
   const scopeContext: ScopeContext = {
@@ -766,7 +1224,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     log.info('flush', 'idle-watchdog', { idleTimeoutMs });
   }
 
-  const replyMode = getMessageReplyMode(controls.cfg);
+  const replyMode = autoMeta && controls.cfg.larkBot?.defaultReplyMode
+    ? controls.cfg.larkBot.defaultReplyMode
+    : getMessageReplyMode(controls.cfg);
   log.info('flush', 'reply-mode', { mode: replyMode });
 
   // Re-read prefs on every flush so toggling /config mid-stream takes
@@ -800,6 +1260,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   try {
     if (replyMode === 'card') {
       let latestState: RunState = initialState;
+      let finalStreamUpdateFailed = false;
       let producerStarted = false;
       let cardCtrl:
         | { update(next: object | ((current: object) => object)): Promise<void> }
@@ -813,7 +1274,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         async (state) => {
           latestState = state;
           if (cardCtrl) {
-            await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
+            const ctrl = cardCtrl;
+            const card = renderCard(filterForPrefs(state), cardRenderOptions);
+            const ok = await updateStreamContent(replyMode, state, { contentType: 'card' }, () =>
+              ctrl.update(card),
+            );
+            if (state.terminal !== 'running') finalStreamUpdateFailed = !ok;
           }
         },
       );
@@ -825,7 +1291,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             producer: async (ctrl) => {
               producerStarted = true;
               cardCtrl = ctrl;
-              await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
+              const card = renderCard(filterForPrefs(latestState), cardRenderOptions);
+              const ok = await updateStreamContent(
+                replyMode,
+                latestState,
+                { contentType: 'card' },
+                () => ctrl.update(card),
+              );
+              if (latestState.terminal !== 'running') finalStreamUpdateFailed = !ok;
               await renderDone;
             },
           },
@@ -837,6 +1310,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         streamDone,
         renderDone,
         producerStarted: () => producerStarted,
+        needsFallback: () => finalStreamUpdateFailed,
         fallback: async (state) => {
           await channel.send(
             chatId,
@@ -847,8 +1321,29 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       });
     } else if (replyMode === 'markdown') {
       let latestState: RunState = initialState;
+      let finalStreamUpdateFailed = false;
+      let finalRepairDone = false;
       let producerStarted = false;
-      let markdownCtrl: { setContent(markdown: string): Promise<void> } | undefined;
+      let markdownStreamMessageId: string | undefined;
+      let markdownCtrl:
+        | { setContent(markdown: string): Promise<void>; readonly messageId?: string }
+        | undefined;
+      const repairFinalMarkdownReply = async (
+        state: RunState,
+        reason: string,
+      ): Promise<void> => {
+        finalRepairDone = true;
+        const body = renderText(filterForPrefs(state));
+        await hardUpdateMarkdownFinalReply({
+          channel,
+          chatId,
+          sendOpts,
+          messageId: markdownStreamMessageId,
+          state,
+          body,
+          reason,
+        });
+      };
       const renderDone = processAgentStream(
         handle,
         eventStream,
@@ -858,7 +1353,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         async (state) => {
           latestState = state;
           if (markdownCtrl) {
-            await markdownCtrl.setContent(renderText(filterForPrefs(state)));
+            const ctrl = markdownCtrl;
+            const body = renderText(filterForPrefs(state));
+            const ok = await updateStreamContent(
+              replyMode,
+              state,
+              { contentType: 'markdown', chars: body.length },
+              () => ctrl.setContent(body),
+            );
+            if (state.terminal !== 'running') finalStreamUpdateFailed = !ok;
           }
         },
       );
@@ -868,24 +1371,34 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           markdown: async (ctrl) => {
             producerStarted = true;
             markdownCtrl = ctrl;
-            await ctrl.setContent(renderText(filterForPrefs(latestState)));
+            markdownStreamMessageId = ctrl.messageId || markdownStreamMessageId;
+            const body = renderText(filterForPrefs(latestState));
+            const ok = await updateStreamContent(
+              replyMode,
+              latestState,
+              { contentType: 'markdown', chars: body.length },
+              () => ctrl.setContent(body),
+            );
+            if (latestState.terminal !== 'running') finalStreamUpdateFailed = !ok;
             await renderDone;
           },
         },
         sendOpts,
-      );
+      ).then((result) => {
+        markdownStreamMessageId = streamResultMessageId(result) || markdownStreamMessageId;
+        return result;
+      });
       await awaitRenderAwareStream({
         mode: replyMode,
         streamDone,
         renderDone,
         producerStarted: () => producerStarted,
-        fallback: async (state) => {
-          const body = renderText(filterForPrefs(state));
-          if (body.trim()) {
-            await channel.send(chatId, { markdown: body }, sendOpts);
-          }
-        },
+        needsFallback: () => finalStreamUpdateFailed,
+        fallback: (state) => repairFinalMarkdownReply(state, 'stream-fallback'),
       });
+      if (!finalRepairDone && latestState.terminal !== 'running') {
+        await repairFinalMarkdownReply(latestState, 'stream-finalize');
+      }
     } else {
       // text mode: drain the agent stream without sending anything during
       // the run, then post the final rendered text once as a plain markdown
@@ -1036,11 +1549,56 @@ async function processAgentStream(
   return state;
 }
 
+async function updateStreamContent(
+  mode: 'card' | 'markdown',
+  state: RunState,
+  fields: Record<string, unknown>,
+  update: () => Promise<void>,
+): Promise<boolean> {
+  const terminal = state.terminal !== 'running';
+  const attempts = terminal ? FINAL_STREAM_UPDATE_ATTEMPTS : 1;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await update();
+      if (terminal) {
+        log.info('stream', 'final-update', {
+          mode,
+          terminal: state.terminal,
+          attempt,
+          ...fields,
+        });
+      }
+      return true;
+    } catch (err) {
+      if (!terminal || attempt === attempts) {
+        log.fail('stream', err, {
+          mode,
+          step: terminal ? 'final-update' : 'update',
+          terminal: state.terminal,
+          attempt,
+          ...fields,
+        });
+        if (terminal) return false;
+        throw err;
+      }
+      log.warn('stream', 'final-update-retry', {
+        mode,
+        terminal: state.terminal,
+        attempt,
+        ...fields,
+      });
+      await delay(FINAL_STREAM_UPDATE_RETRY_MS * attempt);
+    }
+  }
+  return false;
+}
+
 async function awaitRenderAwareStream(input: {
   mode: 'card' | 'markdown';
   streamDone: Promise<unknown>;
   renderDone: Promise<RunState>;
   producerStarted: () => boolean;
+  needsFallback?: () => boolean;
   fallback: (state: RunState) => Promise<void>;
 }): Promise<void> {
   const streamResult = input.streamDone.then(
@@ -1066,6 +1624,10 @@ async function awaitRenderAwareStream(input: {
   if (first.kind === 'stream') {
     const rendered = await renderResult;
     if (!rendered.ok) throw rendered.err;
+    if (input.needsFallback?.()) {
+      log.warn('stream', 'final-update-fallback', { mode: input.mode });
+      await runFallbackReply(input.mode, rendered.state, input.fallback);
+    }
     return;
   }
 
@@ -1089,9 +1651,14 @@ async function awaitRenderAwareStream(input: {
         log.fail('stream', result.err, { mode: input.mode, step: 'stream-terminal-late' });
       }
     });
+    await runFallbackReply(input.mode, first.state, input.fallback);
     return;
   }
   if (!terminal.ok) throw terminal.err;
+  if (input.needsFallback?.()) {
+    log.warn('stream', 'final-update-fallback', { mode: input.mode });
+    await runFallbackReply(input.mode, first.state, input.fallback);
+  }
 }
 
 async function runFallbackReply(
@@ -1104,6 +1671,124 @@ async function runFallbackReply(
   } catch (err) {
     log.fail('stream', err, { mode, step: 'fallback' });
   }
+}
+
+async function hardUpdateMarkdownFinalReply(input: {
+  channel: LarkChannel;
+  chatId: string;
+  sendOpts: SendOptions;
+  messageId: string | undefined;
+  state: RunState;
+  body: string;
+  reason: string;
+}): Promise<void> {
+  if (!input.messageId && !input.body.trim() && input.state.terminal === 'done') {
+    log.info('stream', 'final-hard-update-skipped', {
+      mode: 'markdown',
+      reason: input.reason,
+      terminal: input.state.terminal,
+    });
+    return;
+  }
+
+  const body = finalMarkdownBody(input.body, input.state);
+  if (input.messageId) {
+    try {
+      await input.channel.updateCard(
+        input.messageId,
+        renderFinalMarkdownCard(body, input.state),
+      );
+      log.info('stream', 'final-hard-update', {
+        mode: 'markdown',
+        reason: input.reason,
+        messageId: input.messageId,
+        terminal: input.state.terminal,
+        chars: body.length,
+      });
+      return;
+    } catch (err) {
+      log.fail('stream', err, {
+        mode: 'markdown',
+        step: 'final-hard-update',
+        reason: input.reason,
+        messageId: input.messageId,
+      });
+    }
+  }
+
+  await input.channel.send(input.chatId, { markdown: body }, input.sendOpts);
+  log.warn('stream', 'final-hard-update-fallback-sent', {
+    mode: 'markdown',
+    reason: input.reason,
+    hasMessageId: Boolean(input.messageId),
+    terminal: input.state.terminal,
+    chars: body.length,
+  });
+}
+
+function streamResultMessageId(result: unknown): string | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const messageId = (result as { messageId?: unknown }).messageId;
+  return typeof messageId === 'string' ? messageId : undefined;
+}
+
+function renderFinalMarkdownCard(body: string, state: RunState): object {
+  return {
+    schema: '2.0',
+    config: {
+      streaming_mode: false,
+      summary: { content: finalMarkdownSummary(body, state) },
+    },
+    body: {
+      elements: splitFinalMarkdown(body).map((content) => ({
+        tag: 'markdown',
+        content,
+      })),
+    },
+  };
+}
+
+function finalMarkdownBody(body: string, state: RunState): string {
+  const trimmed = body.trim();
+  if (trimmed) return trimmed;
+  if (state.terminal === 'error' && state.errorMsg) return `⚠️ agent 失败:${state.errorMsg}`;
+  if (state.terminal === 'interrupted') return '_⏹ 已被中断_';
+  if (state.terminal === 'idle_timeout') {
+    const mins = state.idleTimeoutMinutes ?? 0;
+    return `_⏱ ${mins} 分钟无响应,已自动终止_`;
+  }
+  return '_（未返回内容）_';
+}
+
+function splitFinalMarkdown(body: string): string[] {
+  if (body.length <= FINAL_MARKDOWN_CARD_ELEMENT_CHARS) return [body];
+  const chunks: string[] = [];
+  let rest = body;
+  while (rest.length > FINAL_MARKDOWN_CARD_ELEMENT_CHARS) {
+    let cut = rest.lastIndexOf('\n\n', FINAL_MARKDOWN_CARD_ELEMENT_CHARS);
+    if (cut <= 0) cut = rest.lastIndexOf('\n', FINAL_MARKDOWN_CARD_ELEMENT_CHARS);
+    if (cut <= 0) cut = FINAL_MARKDOWN_CARD_ELEMENT_CHARS;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).trimStart();
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
+function finalMarkdownSummary(body: string, state: RunState): string {
+  const preview = finalMarkdownSummaryPreview(body);
+  if (preview) return preview;
+  if (state.terminal === 'interrupted') return '已中断';
+  if (state.terminal === 'idle_timeout') return '已超时';
+  if (state.terminal === 'error') return '出错';
+  return '已完成';
+}
+
+function finalMarkdownSummaryPreview(body: string): string {
+  const normalized = body.replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= FINAL_MARKDOWN_SUMMARY_CHARS) return normalized;
+  return `${normalized.slice(0, FINAL_MARKDOWN_SUMMARY_CHARS - 3).trimEnd()}...`;
 }
 
 function scheduleWorkingReactionCleanup(

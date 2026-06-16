@@ -39,11 +39,11 @@ export async function resolveAppSecret(
   return resolveSecretInput(secret, cfg.secrets, appId, secretPaths);
 }
 
-async function resolveSecretInput(
+export async function resolveSecretInput(
   input: SecretInput,
   secretsCfg: AppConfig['secrets'],
   appId: string,
-  secretPaths: KeystorePaths,
+  secretPaths: KeystorePaths = paths,
 ): Promise<string> {
   if (!input) {
     throw new Error('app secret is missing');

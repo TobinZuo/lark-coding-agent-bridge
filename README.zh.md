@@ -160,6 +160,58 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 
 私聊不需要 @。群和话题群默认必须 `@bot`；`@all` 会被忽略。支持的云文档评论里 @bot 就会触发回复。
 
+## 群消息自动触发
+
+bridge 可以按显式规则自动把群消息交给本机 agent。默认不会监听所有闲聊；只有 bridge 已经收到、或被 `larkBot.poller` 轮询到，并且命中 `larkBot.rules` 的消息才会触发。poller 会先对每个启用的群做一次 warm-up，然后只处理新创建的消息；bridge 重启不会回放停机期间漏掉的历史消息。
+
+`settleMs` 会延迟自动分析，并在执行前重新拉取同一个 `message_id`
+的最新内容。它用于覆盖报警卡片发送后又原地更新 RCA、ACK 等内容的场景。
+
+管理员也可以在目标群里 `@bot` 直接描述监听任务，例如“监听这个群的消息，对告警卡片出现后，调用 lumen-aigc-infra-debug skill 分析报警原因发到报警卡片话题下”。bridge 内置了监听规则 planner，不需要额外配置外部 skill；它会识别“这是监听任务配置意图”、生成规则草案、校验 JSON、强制限定当前群、等待管理员确认后写入配置。
+
+下面只是可选的 profile 字段片段，不要整段覆盖 `config.json`；只有想替换 planner prompt、指定额外 skill、调整超时，或显式关闭时才需要改对应 profile 下的 `larkBot` 字段：
+
+```json
+{
+  "larkBot": {
+    "rulePlanner": {
+      "enabled": true,
+      "skill": "optional-extra-listener-configurator",
+      "timeoutMs": 120000,
+      "maxOutputChars": 40000
+    }
+  }
+}
+```
+
+planner 内部要求只输出 JSON。核心形状如下：
+
+```json
+{
+  "rule": {
+    "messageTypes": ["interactive"],
+    "cardMatchers": [
+      { "path": "$text", "operator": "regex", "value": "报警|告警|alarm" }
+    ],
+    "promptTemplate": "命中消息后注入给 agent 的完整执行 prompt",
+    "replyInThread": true,
+    "cooldownMs": 300000,
+    "settleMs": 60000
+  },
+  "poller": {
+    "intervalMs": 10000,
+    "pageSize": 20
+  },
+  "summary": {
+    "trigger": "当前群告警卡片",
+    "analysis": "使用 lumen-aigc-infra-debug skill 做只读诊断",
+    "reply": "原消息/话题下"
+  }
+}
+```
+
+bridge 会丢弃 planner 输出里的其它 `chatIds`，强制使用当前群；也会拒绝过宽的“所有文本消息”监听。管理员回复“确认规则”后，规则才会写入当前 profile，同时启用 `larkBot.poller` 并把当前群加入 `poller.chatIds`。如果要关闭群内自然语言建规则，可设 `"rulePlanner": { "enabled": false }`。
+
 ## lark-cli 身份策略
 
 每个 profile 都使用当前 profile 的 lark-cli 目录：`~/.lark-channel/profiles/<profile>/lark-cli`。agent 子进程会收到指向这个目录的 `LARKSUITE_CLI_CONFIG_DIR`，所以一个 profile 里的个人授权不会共享给另一个 profile。
